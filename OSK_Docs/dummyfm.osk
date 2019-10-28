@@ -1,0 +1,91 @@
+* Dummy (generic) File Manager
+*
+* does nothing but call driver(s)
+*
+* 08-23-88 A.B. w/mods by A.P.
+*
+use <oskdefs.d>
+TYPE set (FlMgr<<8)+Objct
+ATTR set ((ReEnt+SupStat)<<8)+0
+psect DFM,TYPE,ATTR,1,0,DFMENT
+DFMENT
+dc.w create-DFMENT
+dc.w open-DFMENT
+dc.w makdir-DFMENT
+dc.w chgdir-DFMENT
+dc.w delete-DFMENT
+dc.w seek-DFMENT
+dc.w read-DFMENT
+dc.w write-DFMENT
+dc.w readln-DFMENT
+dc.w writln-DFMENT
+dc.w getstat-DFMENT
+dc.w putstat-DFMENT
+dc.w close-DFMENT
+
+create: equ *
+makdir: equ *
+chgdir: equ *
+delete: equ *
+readln: equ *
+writln: equ *
+notsupport: equ *
+ori.b #Carry,ccr
+move.l #E$IllFnc,d1
+rts
+seek: equ *
+move.w #SS_Seek,d0
+moveq.l #4,d5
+bra.s driver
+close: equ *
+move.w #SS_Close,d0
+moveq.l #4,d5 Call Setstat with Close
+bra.s driver
+open: equ *
+move.w #SS_Open,d0 Call Setstat with Open
+moveq.l #4,d5
+bra.s driver
+read: equ *
+move.l R$d1(a5),d0 :d0 = length [R$d0(a5)=path]
+move.l R$a0(a5),a0 :a0 = buffer addr
+moveq.l #1,d5
+bra.s driver
+write: equ *
+move.l R$d1(a5),d0 :d0 = length [R$d0(a5)=path]
+move.l R$a0(a5),a0 :a0 = buffer addr
+moveq.l #2,d5
+bra.s driver
+putstat: equ *
+move.w R$d1+2(a5),d0 :d0 = func code
+moveq.l #4,d5
+bra.s driver
+getstat: equ *
+move.w R$d1+2(a5),d0 :d0 = func code
+moveq.l #3,d5
+bra.s driver
+rts
+*
+* Subroutine to call a driver
+* a0 - buffer address for read/write
+* a1 - path descriptor
+* a4 - process descriptor
+* a5 - callers stack
+* a6 - system global data
+* returns: cc = carry set , d1.w = error code if error
+driver: equ *
+movem.l d5/a2-a3,-(a7) save some regs
+movea.l PD_DEV(a1),a3 get device table pointer
+movea.l V$STAT(a3),a2 get device static storage
+move.w PD_CPR(a1),V_BUSY(a2) set busy flag to proc id
+movea.l V$DRIV(a3),a3 get address of driver
+lsl.l #1,d5 drivers use word offset
+add.l M$Exec(a3),d5 offset to function
+move.w (a3,d5.l),d5 offset to function routine
+jsr(a3,d5.w) go to driver function
+* :D1 = return status (if any)
+move sr,-(sp) save ccr
+move.l d1,R$d1(A5) return status on user's stack
+move (sp)+,sr restore ccr
+movem.l (a7)+,d5/a2-a3 restore regs
+rts
+ends
