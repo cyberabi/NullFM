@@ -1,0 +1,631 @@
+********************************************************************
+* NullFM - OS-9 Null File Manager
+*
+* $Id$
+*
+* Edt/Rev  YYYY/MM/DD  Modified by
+* Comment
+* ------------------------------------------------------------------
+*   0      2019/10/21  Chris Burke
+* Coded by reverse-engineering 68K DAVID NullFM docs and back-porting
+* to 6809, with some adjustments. See nullAPI.a for API and operation.
+* Driver skeleton is a combination of hand coding and a stripped
+* down SCFMan. Due credit and thanks to the authors of SCFMan!
+*
+
+         nam   NullFM
+         ttl   OS-9 Null File Manager
+
+         ifp1
+         use   defsfile
+         use   nullf.d
+         endc
+
+tylg     set   FlMgr+Objct   
+atrv     set   ReEnt+Rev
+rev      set   $00
+edition  set   0
+
+         mod   eom,name,tylg,atrv,start,size
+
+         rmb   $0000
+size     equ   .
+
+name     fcs   /NullFM/
+         fcb   edition
+
+******************************
+*
+* Null file manager entry point
+*
+* Entry: Y = Path descriptor pointer
+*        U = Callers register stack pointer
+*
+
+start    lbra  Create
+         lbra  Open
+         lbra  MakDir
+         lbra  ChgDir
+         lbra  Delete
+         lbra  Seek
+         lbra  Read
+         lbra  Write
+         lbra  ReadLn
+         lbra  WriteLn
+         lbra  GetStat
+         lbra  PutStat
+         lbra  Close
+* NEW! Direct call entry point
+* Y points at modifiable NPB parameter block
+         lbra  Direct
+
+
+         pag
+******************************
+*
+* Direct Driver Access Handler
+*
+* Entry: B = driver function code
+*        Y = address of parameter block
+*        NBP.DEV,Y = Device Table Entry pointer
+*        NBP.HNDL,Y = Device handle (SPI class)
+*
+* Exit:  Whatever else the driver does
+*
+* Error: CC Carry set  
+*        B = errcode
+*
+* Some function codes manipulate File Manager data structures in addition
+* to calling the driver. The driver can modify the parameter block to
+* return results, and can also invoke callbacks via pointers in the parameter
+* block. Some calls are asynchronous; in this case they enqueue the parameter
+* block (via NBP.PBP and NBP.BUSY) and return immediately.
+*
+* This implementation has class-specific code baked in. That's not great for
+* expansion, but does keep things simple. Consider some other way of handling
+* class-specific code.
+*
+Direct   equ   *
+* Save the function code
+         stb   NPB.FUNC,y
+         
+* Check class of device - SPI devices need a dynamically
+* allocated config block (NBP.FMST)
+         ldx   NPB.DEV,y    DTE pointer
+         ldu   V$DESC,x     Device descriptor pointer
+         lda   IT.NDVC,u    Device class
+          bne  DirNoSPI
+          
+* This is a SPI device. Populate its handle / config
+DirSPI   cmpb  #SPI.RDTC    When Registering a config, we'll allocate a new config block
+          bne  DirSPI1
+
+* Alocate a new SPI config
+         leau  ,x
+         bsr   NewCfg       Allocate config block pointer to X, or carry set and error in B
+          bcc  RDTC1
+          
+* Error out
+DirErr   stb    NBP.ERR,y
+         rts
+          
+* Populate the config, and save a pointer to it in the parameter block
+* NRC.HNDL and NRC.LINK are already valid
+RDTC1    ldd   <NBP.D,y     Clock rate and attributes
+         std   <NRC.CLKR,x
+         ldd   <NBP.Y,y     Transfer attributes and select number
+         std   <NRC.DATR,x
+         ldd   <NBP.U,y     Enable callaback (slave only)
+         std   <NRC.ENAF,x
+         ldd   NBP.PARAM0,y Enable parameter (slave only)
+         std   <NRC.ENAP,x
+         ldd   <NBP.X,y     Disable callaback (slave only)
+         std   <NRC.DISF,x
+         ldd   NBP.PARAM1,y Disable parameter (slave only)
+         std   <NRC.DISPP,x
+         lda   <NRC.HNDL,x  Handle is returned in the "A" reg of the parameter block
+         sta   <NBP.HNDL,y
+         bra   DirSPI3
+         
+* Look up an existing config via NRC.HNDL, and save a pointer to it in the parameter block
+DirSPI1 leau  ,x
+        bsr    GetCfg       Get config block pointer to X, or carry set and error in B
+          bcs  DirErr
+
+DirSPI3  stx   NBP.FMST,y   Save config block pointer in parameter block
+
+* Dispatch to driver. Preserve function code in B, parameter block in Y.
+* Driver can get its DTE from Y->NPB.DEV
+* Driver can get its static storage pointer from Y->NPB.DEV->V$STAT
+DirNoSPI pshs y,b
+
+         leax  Direct8,pc   Save return address for RTS as JSR
+         pshs  x
+         
+         ldx   PD.DEV,y     Device table entry   
+         IFGT  Level-1
+         ldu   V$DRIVEX,x   get dispatch table of driver
+         leau  D$DRCT,u     point to driver method
+         ELSE
+         ldu   V$DRIV,x     get driver module
+         ldd   M$EXEC,u     get offset to dispatch table of driver
+         addd  #D$DRCT
+         leau  d,u          point to driver method
+         ENDC
+         
+         pshs  u            Stack call address into driver (rts as jsr)
+         ldu   V$STAT,x     Device static storage -> U
+         ldb   NPB.FUNC,y   Function code -> B
+         rts                RTS as JSR
+Direct8   bcc  DirOK
+
+* Clean up the stack and return the error. No need to deallocate config on error.
+         leas  1,s          Discard function code
+         puls  y
+         bra   DirErr
+
+* Upon success of SPI.XSM or SPI.DD we return the config block to the free list
+DirOK    puls  y,b
+         cmpb  #SPI.XSM
+          beq  DirFree
+         cmpb  #SPI.DD
+          bne  Direct9
+          
+* Return config block to free list
+DirFree  ldx   NBP.FMST,y   Point to config block
+         ldu   NBP.DEV,y
+         bsr   PutCfg
+         clr   NPB.FMST+0,y Clear parameter block reference in case it is re-used
+         clr   NPB.FMST+1,y
+
+* Success. Y = parameter block.
+Direct9  clr   NBP.ERR,y
+         clrb
+         rts
+         
+         
+         pag
+******************************
+*
+* Configuration block linked list management
+*
+
+* Add a configuration block to the linked list
+* X points at the config block
+* U points at the Device Table Entry
+PutCfg   pshs  u,x,a
+         ldd   1,s          Skip null config blocks
+          beq  PutCfg9
+
+         ldx   V$STAT,u
+         subd  V.NMEM,x
+         asla
+         rolb
+         asla
+         rolb
+         asla
+         rolb
+         asla
+         rolb               Get block handle to B (blocks are 16 bytes, handle is block index)
+         cmpb  V.MAXSLV,x
+          bhi  PutCfg9      Not a valid config block; skip
+         tstb
+          bmi  PutCfg9      Not a valid config block; skip
+          
+         orb   #NRC$INVAL   Mark as not currently active
+         stb   <NRC.HNDL,x
+
+         ldd   #0
+         std   <NRC.ENAF,x
+         std   <NRC.DISF,x  No callbacks
+                 
+         ldu   V$STAT,u
+         leau  V.NFREE,u    Point to head of free list
+         
+         ldd   ,u
+         std   <NRC.LINK,x
+         stx   ,u           This config is the new head of the free list
+         
+PutCfg9  puls  a,x,u,pc
+         
+* Get a configuration block (which should already be initiaized and off the free list) by handle.
+* A is the handle
+* U points at the Device Table Entry
+* Returns config block pointer in X, handle in A
+* Note: NewCfg relies on valid X returned even if the NRC.HNDL check fails
+GetCfg   pshs  a
+         ldx   V$STAT,u
+         cmpa  V.MAXSLV,x
+           bhi GCBPARM
+         tsta
+           bmi GCBPARM
+         
+         ldb   #NRC.SIZ
+         mul
+         ldx   V.NMEM,x     Memory where we store config blocks; handle is index in this memory
+         leax  d,x          Address of the config block
+         lda   NRC.HNDL,x   Check the handle - normally MS bit will be clear
+          bmi  GCBPARM
+          
+         puls  a,pc
+         
+* Handle isn't valid. Return error.
+GCBPARM  comb  
+         ldb   #E$Param
+         puls  a,pc
+
+* Allocate a configuration block from the free list
+* If the device storage isn't initialized, we also lazy-allocate
+* the memory for the free list and build it.
+* U points at the Device Table Entry
+* Returns config block pointer in X, handle in A
+NewCfg   pshs  y
+NewCfg1  ldx   V$STAT,u
+         ldd   V.NMSZ,x     Memory size - should be non-zero
+          beq  NCAlloc
+         ldd   V.NMEM,x     Memory allocation - should be non-zero
+          beq  NCAlloc
+          
+         leay  V.NFREE,x    Point to free list header
+         ldd   ,y
+          beq  NCNORAM      If the list is empty, error
+         
+* Take the head of the free list
+         ldx   ,y           Point to allocated block
+         ldd   NRC.LINK,y
+         std   ,y           Remove from list
+         ldd   #0
+         std   NRC.SIZ,x
+         
+         lda   NRC.HNDL,x   Mark the handle as valid
+         anda  #~NRC$INVAL
+         sta   NRC.HNDL,x
+         
+         puls  y,pc
+         
+NCNORAM  comb
+         ldb   #E$NoRam
+NCXit    puls  y,pc
+         
+* Allocate memory for the config block free list, and build it
+* X points at device static storage
+* U points at the Device Table Entry
+* Caller's Y is stacked
+NCAlloc  ldy   V$DESC,u
+         lda   IT.CCNT,y
+          bmi  NCNORAM      Consider E$Param instead here
+         
+         sta   V.MAXSLV,x   Copy of max slaves
+         ldb   #NRC.SIZ
+         mul
+         pshs  u
+         OS9   F$SRqMem
+         puls  y
+          bcs  NCXit
+          
+* Now Y = DTE, X = statics, U = mem, D = granted
+* Save the parameters of allocated memory and build the free list
+         stu   V.NMEM,x
+         std   V.NMSZ,x
+         
+         pshs  x            Get DTE pointer to U
+         puls  u         
+         ldd   #0
+         std   V.NFREE,u    Empty the free list 
+         lda   V.MAXSLV,u   Allocate one more block than device descriptor asks (in case we are a slave)
+NCThread bsr   GetCfg       Return block pointer in X; Could return error; NRC.HNDL not initialized
+         bsr   PutCfg       Add it to the free list
+         deca
+          bcc  NCThread
+
+         bra   NewCfg1      Try again
+
+         
+         pag
+******************************
+*
+* Supported File Manager Calls (pass-through to driver)
+*
+
+*
+* I$Open Entry Point        
+* 
+* Entry: Y = Path descriptor pointer
+*        Caller A = Access mode
+*        Caller X = Path name pointer
+*
+* Exit:  Stores path number in caller's A
+*        Whatever else the driver does
+*
+* Error: CC Carry set  
+*        B = errcode
+*        
+* Make an SS.Open SetStt call to the driver. We can find
+* the driver from the Device Table Entry in the Path Descriptor
+*
+Open     equ   *
+* Save device table pointer
+         ldx   PD.DEV,y     Get device table pointer
+         stx   PD.TBL,y     Save it (could be zero)
+         
+* Return the path number (will IOMan do this for us?)
+         ldu   PD.RGS,y     Get callers register stack pointer
+         ldb   PD.PD,y
+         stb   R$A,u
+                  
+* Make the SS.Open call
+         ldb   #SS.Open
+         bra   ForceSet
+         
+    
+*
+* I$Close Entry Point
+*
+* Entry: Y = Path descriptor pointer
+*        Caller A = path number
+*                                 
+* Exit:  Whatever else the driver does
+*                                 
+* Error: CC Carry set
+*        B = errcode
+*        
+* Make an SS.Close SetStt call to the driver. We can find
+* the driver from the Device Table Entry in the Path Descriptor
+*
+Close    equ   *
+         ldb   #SS.Close
+         ldu   PD.RGS,y
+         bra   ForceSet
+
+
+*
+* I$Read Entry Point        
+* 
+* Entry: Y = Path descriptor pointer
+*        Caller's A = path
+*        Caller's Y = Byte count
+*        Caller's X = Buffer
+*
+* Exit:  Whatever else the driver does
+*
+* Error: CC Carry set
+*        B = errcode
+*
+Read     equ   *
+         ldu   #D$READ
+         bra   Driver
+
+
+*
+* I$Write Entry Point        
+* 
+* Entry: Y = Path descriptor pointer
+*        Caller's A = path
+*        Caller's Y = Byte count
+*        Caller's X = Buffer
+*
+* Exit:  Whatever else the driver does
+*
+* Error: CC Carry set
+*        B = errcode
+*
+Write    equ   *
+         ldu   #D$WRIT
+         bra   Driver
+
+
+*
+* I$Seek Entry Point
+* For 6809 (no SS.Seek) we use a custom SetStt invocation of SS.Pos
+*
+* Entry: Y = Path descriptor pointer
+*        Caller's A = path
+*        Caller's X = MS 16 bits of file position
+*        Caller's U = LS 16 bits of file position
+*
+* Exit:  Whatever else the driver does
+*
+* Error: CC Carry set
+*        B = errcode
+*
+Seek     equ   *
+         ldb   #SS.Pos
+         ldu   PD.RGS,y
+         bra   ForceSet
+
+     
+*
+* I$GetStt Entry Point
+*
+* Entry: Y = Path descriptor pointer
+*        Caller A = path number
+*        Caller B = function code
+*        Other caller regs
+*
+* Exit:  Whatever else the driver does (even for SS.Opt)
+*
+* Error: CC Carry set
+*        B = errcode
+*
+GetStt   equ   *
+         ldu   PD.RGS,y
+         ldb   R$B,u        Function code
+         cmpb  #SS.Opt
+          bne  FrcGet1      Delegate the call to the driver
+
+* SS.Opt is worth supporting, to surface device info
+GetOpt   bra   FrcGet1      Delegate the call to the driver (STUB)
+
+
+*
+* I$SetStat Entry Point
+*
+* Entry: Y = Path descriptor pointer
+*        Caller A = path number
+*        Caller B = function code
+*        Other caller regs
+*
+* Exit:      
+*
+* Error: CC Carry set
+*        B = errcode
+*
+SetStt   equ   *
+         bra   FrcSet1
+
+
+         pag
+******************************
+*
+* Non-supported File Manager Calls (return error)
+*
+
+*
+* I$Create Entry Point        
+* 
+* Entry: 
+*        
+* Exit:
+*
+* Error: CC Carry set  
+*        B = errcode
+*
+Create   equ   *
+
+
+*
+* I$MakDir Entry Point        
+* 
+* Entry: 
+*        
+*
+* Exit:
+*
+* Error: CC Carry set
+*        B = errcode
+*
+MakDir   equ   *
+
+
+*
+* I$ChgDir Entry Point        
+* 
+* Entry: 
+*        
+*
+* Exit:
+*
+* Error: CC Carry set
+*        B = errcode
+*
+ChgDir   equ   *
+
+
+*
+* I$Delete Entry Point        
+* 
+* Entry: 
+*        
+*
+* Exit:
+*
+* Error: CC Carry set
+*        B = errcode
+*
+Delete   equ   *
+
+
+*
+* I$ReadLn Entry Point        
+* 
+* Entry: 
+*        
+*
+* Exit:
+*
+* Error: CC Carry set
+*        B = errcode
+*
+ReadLn   equ   *
+
+
+*
+* I$WriteLn Entry Point        
+* 
+* Entry: 
+*        
+*
+* Exit:
+*
+* Error: CC Carry set
+*        B = errcode
+*
+WriteLn  equ   *
+
+         comb  
+         ldb   #E$BPNum
+         rts
+         
+
+         pag
+******************************
+*
+* Driver invocation
+* (from an OS9 call that has a path descriptor)
+*
+
+*
+* Make a GetStt call to the driver
+* Enter with Y=PD
+*
+FrcGet1 ldu   #D$GSTA
+        bra   Driver
+
+*
+* Make a SetStt call to the driver
+* Enter with B=function code, Y=PD, U=PD.RGS
+*
+ForceSet stb   R$B,u
+
+* Enter with Y=PD
+FrcSet1  ldu   #D$SSTA
+
+*
+* Make a call to the driver
+* Enter with Y=PD, U=dispatch offset
+*
+Driver   pshs  u,y
+
+         leax  Driver8,pc   Save return address for RTS as JSR
+         pshs  x
+         
+         ldx   PD.DEV,y     Device table entry   
+         IFGT  Level-1
+         ldd   V$DRIVEX,x   get dispatch table of driver
+         leau  d,u          point to driver method
+         ELSE
+         ldu   V$DRIV,x     get driver module
+         ldd   M$EXEC,u     get offset to dispatch table of driver
+         addd  2,s
+         leau  d,u          point to driver method
+         ENDC
+         
+         pshs  u            Stack call address into driver (rts as jsr)         
+         ldu   V$STAT,x     Device static storage
+         rts                RTS as JSR
+Driver8  pshs  b,cc         RTS as JSR returns here; skip ahead if no error
+
+         ldy   1+2,s        Get Path descriptor
+         ldy   PD.RGS,y
+          bcc  Driver9
+
+* Return error code to caller's regs  (will IOMan do this for us?)
+         stb   R$B,y        Error code to caller
+         ldb   ,s           Stacked CC
+         stb   R$CC,y       Error flag to parameter block CC
+
+Driver9  puls  cc,b,y,u,pc
+
+         emod
+eom      equ   *
+         end

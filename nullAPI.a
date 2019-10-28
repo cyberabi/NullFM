@@ -1,0 +1,201 @@
+               PAG       
+********************************************************************
+* NullAPI - System space routines to call NullFM drivers
+*
+* $Id$
+*
+* Edt/Rev  YYYY/MM/DD  Modified by
+* Comment
+* ------------------------------------------------------------------
+*   0      2019/10/23  Chris Burke
+* Coded to resemble 68K DAVID NullFM, with some adjustments.
+* "use" this in other source to include the API.
+*
+
+         ifp1
+         use   defsfile
+         use   nullf.d
+         endc
+
+******************************
+*
+* [DOC] General usage:
+*
+*        ifp1
+*        use   defsfile
+*        use   nullf.d
+*        endc
+*        use   nullAPI.a
+*
+* nullAPI is the API for NullFM and shared resource device drivers.
+* It includes two routines: NFDirect and NFInitPB.
+*
+* NullFM manages shared resources, such as a SPI bus or a flash memory.
+* It doesn't manage individual SPI peripherals or individual regions of
+* a flash memory; a higher-level device driver must do that. NullFM and
+* the associated shared resource device drivers are called only from
+* system space, e.g. by higher-level device drivers.
+*
+* Each type of shared resource has a corresponding device class.
+* Currently there are two device classes: NDC.SPI and NDC.FLASH.
+*
+* Although you can make certain OS9 _$____ calls to NullFM, they are
+* passed through to the shared resource driver with undefined results.
+*
+* Normally you'll do this instead:
+*
+*   "Open" a NullFM shared resource device from a higher-level driver:
+*   - OS9 I$Attach to the device; save Device Table Entry pointer returned in U
+*
+*   "Call" directly, repeatedly, asynchronously into the the shared resource device driver via NullFM:
+*   - Load your Device Table Entry pointer into X
+*   - Load a config handle, returned from a previous call, into A
+*   - Build an NPB parameter block @Y (lbsr NFInitPB + other callback initialization)
+*   - Load a shared resource driver function code into B
+*   - Call into the driver (lbsr NFDirect)
+*   - Most calls are asynchronous and return immediately WITHOUT BEING FINISHED
+*   - Results are returned in the NPB parameter block, via the callback you provided
+*
+*   "Close" a NullFM device:
+*     OS9 I$Detach using the saved Device Table Entry pointer in U
+*
+
+
+******************************
+*
+* [DOC] Functions supported by the NDC.SPI (SPI bus) device class:
+*
+* The SPI device class supports a SPI bus in master or slave mode (depending on hardware)
+*
+* When operating as a master:
+* - Provide a select number in SPI.RDTC
+* - Call SPI.TDT at will to transfer data
+*   The SPI bus driver will allow time between selecting the slave and starting
+*   the data transfer, based on the clock attributes specified in SPI.RDTC. This
+*   means that the higher-level driver must be aware of any timing requirements
+*   of the slave, in order to pass them on to NullFM and the shared resource driver.
+*
+* When operating as a slave:
+* - Provide enable and disable callbacks in SPI.RDTC
+* - Call SPI.TDT when selected (from your enable callback)
+* - The master will need to allow enough time for interrupt service, buffer setup,
+*   and your call back to SPI.TDT between selecting you and starting the transfer.
+*   How this happens is master-specific and not controllable by a slave device.
+*
+* Function code SPI.DD: Deregister a Device
+* - NBP.HNDL = handle to deregister
+* - Errors: E$DevBsy, E$Param
+*
+* Function code SPI.ESM: Enter Slave Mode
+* - NBP.HNDL = handle (slave mode)
+* - NBP.U = ready callback
+* - NBP.PARAM0 = ready callback param
+* - Errors: E$DevBsy, E$Param
+*
+* Function code SPI.XSM: Exit Slave Mode
+* - NBP.HNDL = handle (slave mode)
+* - Errors: E$DevBsy, E$Param, E$NotRdy
+*
+* Function code SPI.RDTC: Register Data Transfer Configuration
+* - NBP.D = clock rate : clock attributes
+* - NBP.X = disable callback (slave mode only)
+* - NBP.Y = transfer attributes : select
+* - NBP.U = enable callback (slave mode only)
+* - NBP.PARAM0 = enable callback param (slave mode only)
+* - NBP.PARAM1 = disable callback param (slave mode only)
+* - Returns NBP.HNDL = handle
+* - Errors: E$NoRam
+*
+* Function code SPI.TDT: Transfer Data to and from the Target
+* - NBP.HNDL = handle 
+* - NBP.B = (optional) constant data byte if transmit buffer is null 
+* - NBP.X = transmit buffer (may be null)
+* - NBP.Y = receive buffer (may be null)
+* - NBP.U = completion callback
+* - NBP.PARAM0 = completion callback param 
+* - NBP.PARAM1 = buffer size
+* - Errors: E$DevBsy, E$Param, E$NoRam
+*
+
+******************************
+*
+* [DOC] Functions supported by the NDC.FLASH (FLASH memory) device class:
+*
+* Function code FLA.DSIZE: Retrieve Number of Sectors and Current Sector Size
+* - NBP.HNDL = Path number from F$Open
+* - Returns NBP.PARAM0 = # sectors
+* - Returns NBP.PARAM1 = Size of sector
+* - Returns NBP.U = Size of smallest writeable region
+* - Errors: E$BPNum
+** Function code FLA.GSPOS: Retrieve the Current Path Position* - NBP.HNDL = Path number from F$Open
+* - Returns NBP.X = MS word of position
+* - Returns NBP.U = LS word of position
+* - Errors: E$BPNum
+** Function code FLA.SSPOS: Establish the Current Path Position
+* - NBP.HNDL = Path number from F$Open
+* - NBP.X = MS word of position
+* - NBP.U = LS word of position
+* - Errors: E$BPNum, E$Seek
+*
+
+******************************
+*
+* Call a NullFM driver via the file manager
+* 
+* Entry: B = driver function code
+*        X = address of Device Table Entry
+*        Y = address of parameter block
+*
+* Exit:  X = address of Device Table Entry
+*        Y = address of parameter block
+*        Parameter block might be modified
+*        Buffers pointed to by parameter block might be modified
+*        Callbacks pointed to by parameter block might have been invoked
+*
+* Error: CC Carry set  
+*        B = errcode
+*        Error code also in NBP.ERR
+*        
+NFDirect equ   *
+         IFGT  Level-1
+         pshs  u,y,x
+         ldu   <V$FMGREX,x  File manager dispatch table
+         ELSE
+         pshs  u,y,x,b
+         ldu   <V$FMGR,x    File manager
+         ldd   <M$EXEC,u    Dispatch table
+         leau  d,u
+         puls  b
+         ENDC
+         jsr   FMDRCT,u     Direct call entry offset for file manager
+         puls  x,y,u,pc
+
+
+******************************
+*
+* Initialize a parameter block
+* The caller has to fill in some of NPB.RGV and NBP.PARMs
+* The file manager will fill in NBP.FMST
+*
+* Entry: X = address of Device Table Entry
+*        Y = address of parameter block
+*        D = parameter block R$D value
+*        U = parameter block R$U value
+*
+* Exit:  X = address of Device Table Entry
+*        Y = address of parameter block
+*        D = parameter block R$D value
+*        U = parameter block R$U value
+*        Linked List, Busy, and DTE fields of NPB initialized
+*        R$X and R$U fields of NPB initialized
+*
+* Error: 
+*
+NFInitPB std   <NPB.RGV+R$D,y
+         stu   <NBP.RGV+R$U,y
+         stx   <NPB.DEV,y   DTE pointer
+         clr   <NPB.PBP+0,y Linked list pointer
+         clr   <NPB.PBP+1,y
+         clr   <NBP.ERR,y   No error yet
+         rts
+         
