@@ -1,0 +1,2 @@
+# NullFM
+  NullFM manages shared resources, such as a SPI bus or a flash memory. It doesn't manage individual SPI peripherals or individual regions of a flash memory; a higher-level device driver must do that.  NullFM and the associated shared resource device drivers are called only from system space, e.g. by higher-level device drivers.  Each type of shared resource has a corresponding device class. Currently there are two device classes: NDC.SPI and NDC.FLASH.
