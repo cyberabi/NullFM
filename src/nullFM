@@ -8,7 +8,7 @@
 * ------------------------------------------------------------------
 *   0      2019/10/21  Chris Burke
 * Coded by reverse-engineering 68K DAVID NullFM docs and back-porting
-* to 6809, with some adjustments. See nullAPI.a for API and operation.
+* to 6809, with some adjustments. See lib/nullAPI for API and operation.
 * Driver skeleton is a combination of hand coding and a stripped
 * down SCFMan. Due credit and thanks to the authors of SCFMan!
 *

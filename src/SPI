@@ -91,7 +91,7 @@ Read     equ   *
 * If the call meant anything it would be, "write to the SPI bus"
 * but not "write to a device attached to the SPI bus"
 *
-Read     equ   *
+Write    equ   *
 
 
          pag
