@@ -134,19 +134,28 @@ CLKA.MD3       SET       3                   SPI Mode 3
 * Values of the NRC.DATR field of the SPI
 * configuration data structure.
 *
-* This indicates whether the device / transaction
+* The lower nybble indicates whether the device / transaction
 * includes read, write, or both operations.
+* The upper nybble indicates whether data is sent MSB-first
+* (normal) or LSB-first (bit-reversed).
 *
 * Typically a read-only configuration sends the same
 * data byte for every swap. while a write-only
 * configuration discards received data. Most SPI
 * configurations will be R+W.
 *
+
+* Low nybble
 * Value will be a standard OS9 file access mode:
 * READ. equ %00000001
 * WRITE. equ %00000010
 * UPDAT. equ READ.+WRITE.
-*
+
+* High nybble
+DATR.ORD       SET       $F0
+
+DATR.MSB       SET       $00
+DATR.LSB       SET       $10
 
 
 *********************************************
