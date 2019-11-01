@@ -14,7 +14,7 @@
 
          ifp1
          use   defsfile
-         use   nullf.d
+         use   nulldefs
          endc
 
 ******************************
@@ -23,9 +23,11 @@
 *
 *        ifp1
 *        use   defsfile
-*        use   nullf.d
+*        use   nulldefs
+*        use   spidefs
+*        use   flashdefs
 *        endc
-*        use   nullAPI.a
+*        use   nullAPI
 *
 * nullAPI is the API for NullFM and shared resource device drivers.
 * It includes two routines: NFDirect and NFInitPB.
@@ -89,7 +91,7 @@
 * Function code SPI.ESM: Enter Slave Mode
 * - NBP.HNDL = handle (slave mode)
 * - NBP.U = ready callback
-* - NBP.PARAM0 = ready callback param
+* - NBP.PRM0 = ready callback param
 * - Errors: E$DevBsy, E$Param
 *
 * Function code SPI.XSM: Exit Slave Mode
@@ -101,8 +103,8 @@
 * - NBP.X = disable callback (slave mode only)
 * - NBP.Y = transfer attributes : select
 * - NBP.U = enable callback (slave mode only)
-* - NBP.PARAM0 = enable callback param (slave mode only)
-* - NBP.PARAM1 = disable callback param (slave mode only)
+* - NBP.PRM0 = enable callback param (slave mode only)
+* - NBP.PRM1 = disable callback param (slave mode only)
 * - Returns NBP.HNDL = handle
 * - Errors: E$NoRam
 *
@@ -112,8 +114,8 @@
 * - NBP.X = transmit buffer (may be null)
 * - NBP.Y = receive buffer (may be null)
 * - NBP.U = completion callback
-* - NBP.PARAM0 = completion callback param 
-* - NBP.PARAM1 = buffer size
+* - NBP.PRM0 = completion callback param 
+* - NBP.PRM1 = buffer size
 * - Errors: E$DevBsy, E$Param, E$NoRam
 *
 
@@ -123,8 +125,8 @@
 *
 * Function code FLA.DSIZE: Retrieve Number of Sectors and Current Sector Size
 * - NBP.HNDL = Path number from F$Open
-* - Returns NBP.PARAM0 = # sectors
-* - Returns NBP.PARAM1 = Size of sector
+* - Returns NBP.PRM0 = # sectors
+* - Returns NBP.PRM1 = Size of sector
 * - Returns NBP.U = Size of smallest writeable region
 * - Errors: E$BPNum
 ** Function code FLA.GSPOS: Retrieve the Current Path Position* - NBP.HNDL = Path number from F$Open
