@@ -70,7 +70,9 @@ Init     equ   *
 * Typically called as a result of I$Detach
 *
 Term     equ   *
-
+         clrb
+         rts
+         
 
          pag
 ******************************
