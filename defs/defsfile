@@ -1,0 +1,8 @@
+level equ 2
+ opt -c
+ opt f
+* NOTE: This file assumes assembler has options to include proper defs directories
+ ifp1
+ use os9defs
+ use systype
+ endc

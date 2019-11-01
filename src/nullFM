@@ -55,7 +55,7 @@ start    lbra  Create
          lbra  ReadLn
          lbra  WriteLn
          lbra  GetStat
-         lbra  PutStat
+         lbra  SetStat
          lbra  Close
 * NEW! Direct call entry point
 * Y points at modifiable NPB parameter block
@@ -69,8 +69,8 @@ start    lbra  Create
 *
 * Entry: B = driver function code
 *        Y = address of parameter block
-*        NBP.DEV,Y = Device Table Entry pointer
-*        NBP.HNDL,Y = Device handle (SPI class)
+*        NPB.DEV,Y = Device Table Entry pointer
+*        NPB.HNDL,Y = Device handle (SPI class)
 *
 * Exit:  Whatever else the driver does
 *
@@ -81,7 +81,7 @@ start    lbra  Create
 * to calling the driver. The driver can modify the parameter block to
 * return results, and can also invoke callbacks via pointers in the parameter
 * block. Some calls are asynchronous; in this case they enqueue the parameter
-* block (via NBP.PBP and NBP.BUSY) and return immediately.
+* block (via NPB.PBP and NPB.BUSY) and return immediately.
 *
 * This implementation has class-specific code baked in. That's not great for
 * expansion, but does keep things simple. Consider some other way of handling
@@ -92,7 +92,7 @@ Direct   equ   *
          stb   NPB.FUNC,y
          
 * Check class of device - SPI devices need a dynamically
-* allocated config block (NBP.FMST)
+* allocated config block (NPB.FMST)
          ldx   NPB.DEV,y    DTE pointer
          ldu   V$DESC,x     Device descriptor pointer
          lda   IT.NDVC,u    Device class
@@ -105,29 +105,29 @@ DirSPI   cmpb  #SPI.RDTC    When Registering a config, we'll allocate a new conf
 
 * Alocate a new SPI config
          leau  ,x
-         bsr   NewCfg       Allocate config block pointer to X, or carry set and error in B
+         lbsr  NewCfg       Allocate config block pointer to X, or carry set and error in B
           bcc  RDTC1
           
 * Error out
-DirErr   stb    NBP.ERR,y
+DirErr   stb    NPB.ERR,y
          puls   a,pc        Clean up device class from the stack
           
 * Populate the config, and save a pointer to it in the parameter block
-* NRC.HNDL and NRC.LINK are already valid
-RDTC1    ldd   <NBP.D,y     Clock rate and attributes
-         std   <NRC.CLKR,x
-         ldd   <NBP.Y,y     Transfer attributes and select number
-         std   <NRC.DATR,x
-         ldd   <NBP.U,y     Enable callaback (slave only)
-         std   <NRC.ENAF,x
-         ldd   NBP.PARAM0,y Enable parameter (slave only)
-         std   <NRC.ENAP,x
-         ldd   <NBP.X,y     Disable callaback (slave only)
-         std   <NRC.DISF,x
-         ldd   NBP.PARAM1,y Disable parameter (slave only)
-         std   <NRC.DISPP,x
-         lda   <NRC.HNDL,x  Handle is returned in the "A" reg of the parameter block
-         sta   <NBP.HNDL,y
+* NRC.HNDL and NRC.LNK are already valid
+RDTC1    ldd   NPB.D,y      Clock rate and attributes
+         std   NRC.CLKR,x
+         ldd   NPB.Y,y      Transfer attributes and select number
+         std   NRC.DATR,x
+         ldd   NPB.U,y      Enable callaback (slave only)
+         std   NRC.ENAF,x
+         ldd   NPB.PRM0,y   Enable parameter (slave only)
+         std   NRC.ENAP,x 
+         ldd   NPB.X,y      Disable callaback (slave only)
+         std   NRC.DISF,x 
+         ldd   NPB.PRM1,y   Disable parameter (slave only)
+         std   NRC.DISP,x 
+         lda   NRC.HNDL,x   Handle is returned in the "A" reg of the parameter block
+         sta   NPB.HNDL,y
          bra   DirSPI3
          
 * Look up an existing config via NRC.HNDL, and save a pointer to it in the parameter block
@@ -135,7 +135,7 @@ DirSPI1 leau   ,x
         bsr    GetCfg       Get config block pointer to X, or carry set and error in B
           bcs  DirErr
 
-DirSPI3  stx   NBP.FMST,y   Save config block pointer in parameter block
+DirSPI3  stx   NPB.FMST,y   Save config block pointer in parameter block
 
 * Dispatch to driver. Preserve function code in B, parameter block in Y.
 * Driver can get its DTE from Y->NPB.DEV
@@ -178,14 +178,14 @@ DirOK    puls  a,b,y        Get device class, function code, parameter block
           bne  Direct9
           
 * Return config block to free list
-DirFree  ldx   NBP.FMST,y   Point to config block
-         ldu   NBP.DEV,y
+DirFree  ldx   NPB.FMST,y   Point to config block
+         ldu   NPB.DEV,y
          bsr   PutCfg
          clr   NPB.FMST+0,y Clear parameter block reference in case it is re-used
          clr   NPB.FMST+1,y
 
 * Success. Y = parameter block.
-Direct9  clr   NBP.ERR,y
+Direct9  clr   NPB.ERR,y
          clrb
          rts
          
@@ -218,18 +218,18 @@ PutCfg   pshs  u,x,a
          tstb
           bmi  PutCfg9      Not a valid config block; skip
           
-         orb   #NRC$INVAL   Mark as not currently active
-         stb   <NRC.HNDL,x
+         orb   #NRC$Inv     Mark as not currently active
+         stb   NRC.HNDL,x
 
          ldd   #0
-         std   <NRC.ENAF,x
-         std   <NRC.DISF,x  No callbacks
+         std   NRC.ENAF,x
+         std   NRC.DISF,x    No callbacks
                  
          ldu   V$STAT,u
          leau  V.NFREE,u    Point to head of free list
          
          ldd   ,u
-         std   <NRC.LINK,x
+         std   NRC.LNK,x
          stx   ,u           This config is the new head of the free list
          
 PutCfg9  puls  a,x,u,pc
@@ -260,39 +260,6 @@ GCBPARM  comb
          ldb   #E$Param
          puls  a,pc
 
-* Allocate a configuration block from the free list
-* If the device storage isn't initialized, we also lazy-allocate
-* the memory for the free list and build it.
-* U points at the Device Table Entry
-* Returns config block pointer in X, handle in A
-NewCfg   pshs  y
-NewCfg1  ldx   V$STAT,u
-         ldd   V.NMSZ,x     Memory size - should be non-zero
-          beq  NCAlloc
-         ldd   V.NMEM,x     Memory allocation - should be non-zero
-          beq  NCAlloc
-          
-         leay  V.NFREE,x    Point to free list header
-         ldd   ,y
-          beq  NCNORAM      If the list is empty, error
-         
-* Take the head of the free list
-         ldx   ,y           Point to allocated block
-         ldd   NRC.LINK,y
-         std   ,y           Remove from list
-         ldd   #0
-         std   NRC.SIZ,x
-         
-         lda   NRC.HNDL,x   Mark the handle as valid
-         anda  #~NRC$INVAL
-         sta   NRC.HNDL,x
-         
-         puls  y,pc
-         
-NCNORAM  comb
-         ldb   #E$NoRam
-NCXit    puls  y,pc
-         
 * Allocate memory for the config block free list, and build it
 * X points at device static storage
 * U points at the Device Table Entry
@@ -324,8 +291,43 @@ NCThread bsr   GetCfg       Return block pointer in X; Could return error; NRC.H
          deca
           bcc  NCThread
 
-         bra   NewCfg1      Try again
+         puls  y            Try again
 
+* Allocate a configuration block from the free list
+* If the device storage isn't initialized, we also lazy-allocate
+* the memory for the free list and build it.
+* U points at the Device Table Entry
+* Returns config block pointer in X, handle in A
+NewCfg   pshs  y
+NewCfg1  ldx   V$STAT,u
+         ldd   V.NMSZ,x     Memory size - should be non-zero
+          beq  NCAlloc
+         ldd   V.NMEM,x     Memory allocation - should be non-zero
+          beq  NCAlloc
+          
+         leay  V.NFREE,x    Point to free list header
+         ldd   ,y
+          beq  NCNORAM      If the list is empty, error
+         
+* Y = Address of free list head pointer
+* D = Value of free list head pointer
+* Take the head of the free list
+         ldx   ,y           X = first block in free list
+         ldd   NRC.LNK,x    D = next block in free list (or $0000)
+         std   ,y           New head of free list is that old "next" block, removing X from list
+         ldd   #0
+         std   NRC.LNK,x    X is not part of any list now
+         
+         lda   NRC.HNDL,x   Mark the handle as valid
+         anda  #^NRC$Inv
+         sta   NRC.HNDL,x
+         
+         puls  y,pc
+         
+NCNORAM  comb
+         ldb   #E$NoRam
+NCXit    puls  y,pc
+         
          
          pag
 ******************************
@@ -450,7 +452,7 @@ Seek     equ   *
 * Error: CC Carry set
 *        B = errcode
 *
-GetStt   equ   *
+GetStat  equ   *
          ldu   PD.RGS,y
          ldb   R$B,u        Function code
          cmpb  #SS.Opt
@@ -473,7 +475,7 @@ GetOpt   bra   FrcGet1      Delegate the call to the driver (STUB)
 * Error: CC Carry set
 *        B = errcode
 *
-SetStt   equ   *
+SetStat  equ   *
          bra   FrcSet1
 
 
@@ -591,7 +593,7 @@ FrcGet1 ldu   #D$GSTA
 ForceSet stb   R$B,u
 
 * Enter with Y=PD
-FrcSet1  ldu   #D$SSTA
+FrcSet1  ldu   #D$PSTA
 
 *
 * Make a call to the driver

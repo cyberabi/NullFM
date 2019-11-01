@@ -1,4 +1,3 @@
-
 NULLDEFS       SET       1
 
 ********************************************************************
@@ -41,7 +40,14 @@ D$DRCT         RMB       3                   Entry point in device driver for di
                ORG       E$IllArg
 E$Param        RMB       1                   Alias for OSK error code used in DAVID NullFM docs
 
-
+               IFGT      Level-1
+               ORG       V$USRS
+               RMB       1
+V$DRIVEX       RMB       2                   Device Driver execution address
+V$FMGREX       RMB       2                   File Manager execution address
+               ENDC
+               
+               
                PAG       
 *******************************
 * NullFM device classes (IT.NDVC)
@@ -104,26 +110,28 @@ V$NMAGIC       SET       $FFFF
                ORG       0
 NPB.DEV        RMB       2                   Device Table Entry Address
 NPB.RGV        RMB       (R$Size-2)          Register / Parameter package (no PC) e.g. NPB.RGV+R$X for X
-NPB.PARM0      RMB       2                   Additional 16-bit parameter, typically a pointer
-NPB.PARM1      RMB       2                   Additional 16-bit parameter, typically a pointer
+NPB.PRM0       RMB       2                   Additional 16-bit parameter, typically a pointer
+NPB.PRM1       RMB       2                   Additional 16-bit parameter, typically a pointer
 NPB.FMST       RMB       2                   FM / Driver use: Pointer to registered configuration
 NPB.PBP        RMB       2                   Pointer to next parameter block in wait list, or $0000
 NPB.SIZ        EQU       .
 
-NPB.ERR        EQU       (NBP.RGV+R$CC)      CC is not stored; instead, result of the call; 0 = OK, non-zero = error code
-NBP.FUNC       EQU       (NBP.RGV+R$DP)      DP is not stored; instead, store the function code (e.g. SPI.TDT) here
-NBP.HNDL       EQU       (NBP.RGV+R$A)       SPI specific: A is the "handle" for a registered confifuration
+NPB.ERR        EQU       (NPB.RGV+R$CC)      CC is not stored; instead, result of the call; 0 = OK, non-zero = error code
+NPB.FUNC       EQU       (NPB.RGV+R$DP)      DP is not stored; instead, store the function code (e.g. SPI.TDT) here
+NPB.HNDL       EQU       (NPB.RGV+R$A)       SPI specific: A is the "handle" for a registered confifuration
 
-NBP.D          EQU       (NBP.RGV+R$D)       "D" register parameter block contents
-NBP.B          EQU       (NBP.RGV+R$B)       "B" register parameter block contents
-NBP.U          EQU       (NBP.RGV+R$U)       "U" register parameter block contents
+NPB.B          EQU       (NPB.RGV+R$B)       "B" register parameter block contents
+NPB.D          EQU       (NPB.RGV+R$D)       "D" register parameter block contents
+NPB.X          EQU       (NPB.RGV+R$X)       "X" register parameter block contents
+NPB.Y          EQU       (NPB.RGV+R$Y)       "Y" register parameter block contents
+NPB.U          EQU       (NPB.RGV+R$U)       "U" register parameter block contents
 
 
                PAG        
 *********************************************
 * Direct call function codes
 *
-               ORG       $00
+               ORG       0
 * Common NullFM function codes
                RMB       16
 NFC.CFC        EQU       .                   Start of class-specific function codes
