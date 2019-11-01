@@ -1,0 +1,151 @@
+********************************************************************
+* SPI - OS-9 SPI Bus Device Driver
+*
+* $Id$
+*
+* Edt/Rev  YYYY/MM/DD  Modified by
+* Comment
+* ------------------------------------------------------------------
+*   0      2019/10/31  Chris Burke
+* Coded to match prototype Burke & Burke SPI interface, using
+* SPI device class of NullFM file manager. Generally this driver
+* ignores all calls other than to the direct entry point.
+*
+
+         nam   SPI
+         ttl   OS-9 SPI Bus Device Driver
+
+         ifp1
+         use   defsfile
+         use   nulldefs
+         use   spidefs
+         use   flashdefs
+         endc
+
+tylg     set   Drivr+Objct   
+atrv     set   ReEnt+Rev
+rev      set   $00
+edition  set   0
+
+         mod   eom,name,tylg,atrv,start,size
+
+         rmb   $0000
+size     equ   .
+
+name     fcs   /SPI/
+         fcb   edition
+
+******************************
+*
+* SPI bus device driver entry point
+*
+* Entry: Y = Path descriptor pointer
+*        U = Callers register stack pointer
+*
+
+start    lbra  Init
+         lbra  Read
+         lbra  Write
+         lbra  GetStat
+         lbra  SetStat
+         lbra  Term
+* NEW! NullFM direct call entry point
+* Y points at modifiable NPB parameter block
+         lbra  Direct
+
+
+         pag
+******************************
+*
+* Initialize the device
+* Typically called as a result of I$Attach
+*
+Init     equ   *
+
+
+         pag
+******************************
+*
+* Decommission the device
+* Typically called as a result of I$Detach
+*
+Term     equ   *
+
+
+         pag
+******************************
+*
+* Read from the device
+* This is a pass-through from NullFM.
+* If the call meant anything it would be, "read from the SPI bus"
+* but not "read from a device attached to the SPI bus"
+*
+Read     equ   *
+
+
+         pag
+******************************
+*
+* Write to the device
+* This is a pass-through from NullFM.
+* If the call meant anything it would be, "write to the SPI bus"
+* but not "write to a device attached to the SPI bus"
+*
+Read     equ   *
+
+
+         pag
+******************************
+*
+* Get status of the device
+* This is a pass-through from NullFM.
+* If the call meant anything it would be, "get status of the SPI bus"
+* but not "get status of a device attached to the SPI bus"
+*
+GetStat  equ   *
+
+
+         pag
+******************************
+*
+* Set status of the device
+* This is a pass-through from NullFM.
+* If the call meant anything it would be, "set status of the SPI bus"
+* but not "set status of a device attached to the SPI bus"
+*
+SetStat  equ   *
+
+         comb  
+         ldb   #E$Param
+         rts
+         
+         
+         pag
+******************************
+*
+* Direct Driver Access Handler
+*
+* Entry: B = driver function code
+*        Y = address of parameter block
+*        NPB.DEV,Y = Device Table Entry pointer
+*        NPB.HNDL,Y = Device handle (SPI class)
+*        NPB.DEV->V$STAT = Driver static storage
+*
+* Exit:  Depends on function code
+*
+* Error: CC Carry set  
+*        B = errcode
+*
+* This driver modifies the parameter block to return results, and
+* invokes callbacks via pointers in the parameter block.
+*
+* Some calls are asynchronous; in this case they enqueue the parameter
+* block (via NPB.PBP and NPB.BUSY) and return immediately.
+*
+Direct   equ   *
+         rts
+         
+
+         emod
+eom      equ   *
+         end
