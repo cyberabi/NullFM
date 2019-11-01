@@ -1,0 +1,173 @@
+
+SPIDEFS        SET       1
+
+********************************************************************
+* SPIDEFS - Serial Peripheral Interface (SPI) Device Class Definitions
+*
+* $Id$
+*
+* SPI stands for 'Serial Peripheral Interface.' The SPI bus is a
+* multi-peripheral serial bus found in many microprocessors and
+* peripherals.
+*
+* The SPI driver associates with the NullFM fle manager allowing
+* multiple higher-level device drivers to share the SPI bus.
+*
+* The data structures in this file give SPI devices their 'personality'
+* and are used by higher-level drivers, NullFM, and SPI peripheral
+* device descriptors.
+*
+* All SPI buses are NullFM device class NDC.SPI.
+*
+* Edt/Rev  YYYY/MM/DD  Modified by
+* Comment
+* ------------------------------------------------------------------
+*          2019/10/30  Chris Burke
+* First cut, based on reverse-engineering from DAVID OSK NullFM docs.
+
+               NAM       SPIDEFS
+               TTL       NullFM SPI Device Class Definitions
+
+
+               PAG
+*******************************
+* SPI Device Descriptor Offsets
+*
+* These descriptors define the shared resource, not
+* individual peripherals attached to the shared resource.
+*
+               ORG       IT.NCLASS
+IT.CCNT        RMB       1                   (SPI) Number of config blocks to allocate (0..127)
+
+
+               PAG        
+*********************************************
+* SPI Device Class (NDC.SPI) direct call function codes
+*
+* These can overlap with function codes for other classes.
+* Distinguish by device class (IT.NDVC) 
+*
+               ORG       NFC.CFC
+SPI.DD         RMB       1                   Deregister a Device
+SPI.ESM        RMB       1                   Enter Slave Mode
+SPI.XSM        RMB       1                   Exit Slave Mode
+SPI.RDTC       RMB       1                   Register Data Transfer Configuration
+SPI.TDT        RMB       1                   Transfer Data to and from the Target
+
+
+               PAG        
+*********************************************
+* SPI registered configuration data structure
+*
+* NOTE: NullFM assumes this is exactly 16 bytes
+* NOTE: Keep CLKR and CLKA together in this order
+* NOTE: Keep DATR and SEL together in this order
+*
+               ORG       $00
+NRC.HNDL       RMB       1                   Handle for this config block
+NRC.CLKR       RMB       1                   Clock rate for slave device (1=High, 0=Low)NRC.CLKA       RMB       1                   +Clock attributes for slave device (Mode 0..3)
+NRC.DATR       RMB       1                   Attributes for slave device data transfer (RW)NRC.SEL        RMB       1                   +SPI select number (0..127); MSB set = invalid (6809 specific)
+NRC.PRIO       RMB       1                   Priority for slave device data transfer (Unused, queuing)
+NRC.ENAF       RMB       2                   Pointer to slave_enable() callback function in the higher-level driver.NRC.DISF       RMB       2                   Pointer to slave_disable() callback function in the higher-level driver.NRC.ENAP       RMB       2                   Pointer parameter to be passed to slave_enable() callback function.NRC.DISP       RMB       2                   Pointer parameter to be passed to slave_disable() callback function.NRC.LINK       RMB       2                   Linked list pointer for free list of configs.NRC.SIZ        EQU       .
+
+NRC$INVAL      EQU       $80                 Set this bit to mark a config data structure as invalid
+
+
+               PAG       
+*********************************************
+* Values of the NRC.CLKR field of the SPI
+* configuration data structure.
+*
+* The lower nybble specifies high speed or low speed SPI clock.
+* The upper nybble specifies the minimum delay from asserting
+* the SPI device select to the first clock pulse of a transfer.
+* This accommodates, e.g., interrupt response and data setup
+* times for a system in which a CPU is acting as a SPI slave.
+*
+
+* Low nybble
+CLKR.LOW       SET       0                   Slow SPI clock (<1.6 MHz)
+CLKR.HI        SET       1                   Fast SPI clock (rate TBD)
+
+* High nybble
+* This is a power of two, microseconds; subtract 1 from result
+* $0X means, 2^0 - 1 or 0us minimum time
+* $FX means, 2^15 - 1 or 32.8ms minimum time
+CLKR.DLY       SET       $F0
+
+CLKR.0US       SET       $00
+CLKR.1US       SET       $10
+CLKR.3US       SET       $20
+CLKR.7US       SET       $30
+CLKR.15US      SET       $40
+CLKR.31US      SET       $50
+CLKR.63US      SET       $60
+CLKR.127US     SET       $70
+CLKR.255US     SET       $80
+CLKR.511US     SET       $90
+CLKR.1MS       SET       $A0
+CLKR.2MS       SET       $B0
+CLKR.4MS       SET       $C0
+CLKR.8MS       SET       $D0
+CLKR.16MS      SET       $E0
+CLKR.32MS      SET       $F0
+
+
+*********************************************
+* Values of the NRC.CLKA field of the SPI
+* configuration data structure.
+*
+* This is the SPI mode, 0..3, which specifies the polarity
+* and phase of the SPI clock needed by the peripheral.
+*
+* Code assumes that these symbols map directly to the
+* values 0..3
+*
+
+CLKA.MD0       SET       0                   SPI Mode 0
+CLKA.MD1       SET       1                   SPI Mode 1
+CLKA.MD2       SET       2                   SPI Mode 2
+CLKA.MD3       SET       3                   SPI Mode 3
+
+
+*********************************************
+* Values of the NRC.DATR field of the SPI
+* configuration data structure.
+*
+* This indicates whether the device / transaction
+* includes read, write, or both operations.
+*
+* Typically a read-only configuration sends the same
+* data byte for every swap. while a write-only
+* configuration discards received data. Most SPI
+* configurations will be R+W.
+*
+* Value will be a standard OS9 file access mode:
+* READ. equ %00000001
+* WRITE. equ %00000010
+* UPDAT. equ READ.+WRITE.
+*
+
+
+*********************************************
+* Values of the NRC.SEL field of the SPI
+* configuration data structure.
+*
+* This is the SPI select number for a peripheral.
+* Valid values are in the range 0..127 although
+* most SPI busses will support < 16 selects.
+* Values with the MSB set are invalid due to
+* driver / file manager internal coding.
+*
+
+
+*********************************************
+* Values of the NRC.PRIO field of the SPI
+* configuration data structure.
+*
+* In a more sophisticated implementation this
+* field is used to maintain pending bus
+* requests in a priority queue (0 = highest).
+* The current implementation of NullFM ignores
+* this field.
+*

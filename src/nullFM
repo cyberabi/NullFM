@@ -18,7 +18,9 @@
 
          ifp1
          use   defsfile
-         use   nullf.d
+         use   nulldefs
+         use   spidefs
+         use   flashdefs
          endc
 
 tylg     set   FlMgr+Objct   
@@ -94,6 +96,7 @@ Direct   equ   *
          ldx   NPB.DEV,y    DTE pointer
          ldu   V$DESC,x     Device descriptor pointer
          lda   IT.NDVC,u    Device class
+         pshs  a            Stash for later
           bne  DirNoSPI
           
 * This is a SPI device. Populate its handle / config
@@ -107,7 +110,7 @@ DirSPI   cmpb  #SPI.RDTC    When Registering a config, we'll allocate a new conf
           
 * Error out
 DirErr   stb    NBP.ERR,y
-         rts
+         puls   a,pc        Clean up device class from the stack
           
 * Populate the config, and save a pointer to it in the parameter block
 * NRC.HNDL and NRC.LINK are already valid
@@ -128,7 +131,7 @@ RDTC1    ldd   <NBP.D,y     Clock rate and attributes
          bra   DirSPI3
          
 * Look up an existing config via NRC.HNDL, and save a pointer to it in the parameter block
-DirSPI1 leau  ,x
+DirSPI1 leau   ,x
         bsr    GetCfg       Get config block pointer to X, or carry set and error in B
           bcs  DirErr
 
@@ -161,11 +164,14 @@ Direct8   bcc  DirOK
 
 * Clean up the stack and return the error. No need to deallocate config on error.
          leas  1,s          Discard function code
-         puls  y
+         puls  y            Recover pointer to parameter block
          bra   DirErr
 
+DirOK    puls  a,b,y        Get device class, function code, parameter block
+         tsta
+          bne  Direct9      Skip extra cleanup if not SPI
+          
 * Upon success of SPI.XSM or SPI.DD we return the config block to the free list
-DirOK    puls  y,b
          cmpb  #SPI.XSM
           beq  DirFree
          cmpb  #SPI.DD
@@ -344,11 +350,8 @@ NCThread bsr   GetCfg       Return block pointer in X; Could return error; NRC.H
 * the driver from the Device Table Entry in the Path Descriptor
 *
 Open     equ   *
-* Save device table pointer
-         ldx   PD.DEV,y     Get device table pointer
-         stx   PD.TBL,y     Save it (could be zero)
-         
 * Return the path number (will IOMan do this for us?)
+         ldx   PD.DEV,y     Get device table pointer
          ldu   PD.RGS,y     Get callers register stack pointer
          ldb   PD.PD,y
          stb   R$A,u

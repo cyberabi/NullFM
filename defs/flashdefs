@@ -1,27 +1,58 @@
 
-NULLF.D       SET       1
+FLASHDEFS      SET       1
 
 ********************************************************************
-* NULLF.d - Null File Manager Definitions
+* FLASHDEFS - Flash Memory Device Class Definitions
 *
 * $Id$
 *
-* NULLF stands for 'Null Filemanager' and is a package of subroutines
-* that define the logical structure of a generic device that controls
-* a shared resource such as a SPI bus or a Flash memory bank.
+* Flash memory is a shared resource that can be divided into many
+* sections / sectors to store data or parameters for multiple
+* applications.
 *
-* The data structures in this file give NULLF its 'personality' and are
-* used by NullFM itself, as well as by other drivers that share the
-* associated device resources.
+* The Flash driver associates with the NullFM fle manager allowing
+* multiple higher-level device drivers to share flash memory.
 *
+* The data structures in this file give a flash memory its 'personality'
+* and are used by higher-level drivers, NullFM, and flash memory
+* device descriptors.
+*
+* All flash memories are NullFM device class NDC.FLASH.
+*
+* Edt/Rev  YYYY/MM/DD  Modified by
 * Edt/Rev  YYYY/MM/DD  Modified by
 * Comment
 * ------------------------------------------------------------------
-*          2019/10/23  Chris Burke
-* Coded using SCF.d as a strarting point.
+*          2019/10/31  Chris Burke
+* First cut, based on reverse-engineering from DAVID OSK NullFM docs.
 
-               NAM       NULLF.d
-               TTL       Null File Manager Definitions
+               NAM       FLASHDEFS
+               TTL       NullFM Flash Memory Device Class Definitions
+
+
+               PAG       
+*******************************
+* Flash Device Descriptor Offsets
+*
+* These descriptors define the shared resource, not
+* individual regions of the shared resource.
+*
+               ORG       IT.NCLASS
+IT.SCTN        RMB       2                   (FLASH) Number of Flash Sectors
+IT.SCTSZ       RMB       2                   (FLASH) Size of a Flash Sector (e.g. 4096)
+IT.BLKSZ       RMB       2                   (FLASH) Size of a Flash programmable block (e.g. 256)
+
+
+               PAG        
+*********************************************
+* Flash Device Class (NDC.FLASH) direct call function codes
+*
+* These can overlap with function codes for other classes.
+* Distinguish by device class (IT.NDVC) 
+*
+               ORG       NFC.CFC
+FLA.DSIZE      RMB       1                   Retrieve Number of Sectors and Current Sector SizeFLA.GSPOS      RMB       1                   Retrieve the Current Path PositionFLA.SSPOS      RMB       1                   Establish the Current Path Position
+
 
                PAG       
 *******************************
@@ -47,23 +78,6 @@ E$Param        RMB       1                   Alias for OSK error code used in DA
 *
 NDC.SPI        SET       0                   Serial Peripheral Interface (SPI) device class
 NDC.FLASH      SET       0                   Flash device class
-
-
-               PAG       
-*******************************
-* NullFM Device Descriptor Offsets
-*
-* These definitions are for NullFM device descriptors.
-*
-               ORG       M$DTyp
-IT.NDVT        RMB       1                   Device type (DT.NULL)
-IT.NDVC        RMB       1                   Device class (NDC.SPI, NDC.FLASH)
-IT.ACMD        RMB       1                   Access mode (READ., WRITE., SHARE.)
-IT.MPAK        RMB       1                   MultiPak slot number
-IT.CCNT        RMB       1                   (SPI) Number of config blocks to allocate (0..127)
-IT.SCTN        RMB       2                   (FLASH) Number of Flash Sectors
-IT.SCTSZ       RMB       2                   (FLASH) Size of a Flash Sector (e.g. 4096)
-IT.BLKSZ       RMB       2                   (FLASH) Size of a Flash programmable block (e.g. 256)
 
 
                PAG       
