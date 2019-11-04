@@ -55,8 +55,14 @@
 *   - Build an NPB parameter block @Y (lbsr NFInitPB + other callback initialization)
 *   - Load a shared resource driver function code into B
 *   - Call into the driver (lbsr NFDirect)
-*   - Most calls are asynchronous and return immediately WITHOUT BEING FINISHED
+*   - Most calls are asynchronous and return immediately WITH OR WITHOUT BEING FINISHED
+*   - There's a flag in the parameter block to indicate whether it is finished or not.
 *   - Results are returned in the NPB parameter block, via the callback you provided
+*   - The callback receives a pointer argument in U, a parameter block pointer in Y,
+*     and carry set / error in B if error
+*   - The callback must not deallocate / re-use the parameter block as it is / could be
+*     invoked before the call to NFDirect has returned.
+*   - The callback doesn't return an error code, and does not have to preserve B / CC
 *
 *   "Close" a NullFM device:
 *     OS9 I$Detach using the saved Device Table Entry pointer in U
@@ -85,37 +91,37 @@
 *   How this happens is master-specific and not controllable by a slave device.
 *
 * Function code SPI.DD: Deregister a Device
-* - NBP.HNDL = handle to deregister
+* - NPB.HNDL = handle to deregister
 * - Errors: E$DevBsy, E$Param
 *
 * Function code SPI.ESM: Enter Slave Mode
-* - NBP.HNDL = handle (slave mode)
-* - NBP.U = ready callback
-* - NBP.PRM0 = ready callback param
+* - NPB.HNDL = handle (slave mode)
+* - NPB.U = ready callback
+* - NPB.PRM0 = ready callback param
 * - Errors: E$DevBsy, E$Param
 *
 * Function code SPI.XSM: Exit Slave Mode
-* - NBP.HNDL = handle (slave mode)
+* - NPB.HNDL = handle (slave mode)
 * - Errors: E$DevBsy, E$Param, E$NotRdy
 *
 * Function code SPI.RDTC: Register Data Transfer Configuration
-* - NBP.D = clock rate : clock attributes
-* - NBP.X = disable callback (slave mode only)
-* - NBP.Y = transfer attributes : select
-* - NBP.U = enable callback (slave mode only)
-* - NBP.PRM0 = enable callback param (slave mode only)
-* - NBP.PRM1 = disable callback param (slave mode only)
-* - Returns NBP.HNDL = handle
+* - NPB.D = clock rate : clock attributes
+* - NPB.X = disable callback (slave mode only)
+* - NPB.Y = transfer attributes : select
+* - NPB.U = enable callback (slave mode only)
+* - NPB.PRM0 = enable callback param (slave mode only)
+* - NPB.PRM1 = disable callback param (slave mode only)
+* - Returns NPB.HNDL = handle
 * - Errors: E$NoRam
 *
 * Function code SPI.TDT: Transfer Data to and from the Target
-* - NBP.HNDL = handle 
-* - NBP.B = (optional) constant data byte if transmit buffer is null 
-* - NBP.X = transmit buffer (may be null)
-* - NBP.Y = receive buffer (may be null)
-* - NBP.U = completion callback
-* - NBP.PRM0 = completion callback param 
-* - NBP.PRM1 = buffer size
+* - NPB.HNDL = handle 
+* - NPB.B = (optional) constant data byte if transmit buffer is null 
+* - NPB.X = transmit buffer (may be null)
+* - NPB.Y = receive buffer (may be null)
+* - NPB.U = completion callback
+* - NPB.PRM0 = completion callback param 
+* - NPB.PRM1 = buffer size
 * - Errors: E$DevBsy, E$Param, E$NoRam
 *
 
@@ -124,19 +130,19 @@
 * [DOC] Functions supported by the NDC.FLASH (FLASH memory) device class:
 *
 * Function code FLA.DSIZE: Retrieve Number of Sectors and Current Sector Size
-* - NBP.HNDL = Path number from F$Open
-* - Returns NBP.PRM0 = # sectors
-* - Returns NBP.PRM1 = Size of sector
-* - Returns NBP.U = Size of smallest writeable region
+* - NPB.HNDL = Path number from F$Open
+* - Returns NPB.PRM0 = # sectors
+* - Returns NPB.PRM1 = Size of sector
+* - Returns NPB.U = Size of smallest writeable region
 * - Errors: E$BPNum
-** Function code FLA.GSPOS: Retrieve the Current Path Position* - NBP.HNDL = Path number from F$Open
-* - Returns NBP.X = MS word of position
-* - Returns NBP.U = LS word of position
+** Function code FLA.GSPOS: Retrieve the Current Path Position* - NPB.HNDL = Path number from F$Open
+* - Returns NPB.X = MS word of position
+* - Returns NPB.U = LS word of position
 * - Errors: E$BPNum
 ** Function code FLA.SSPOS: Establish the Current Path Position
-* - NBP.HNDL = Path number from F$Open
-* - NBP.X = MS word of position
-* - NBP.U = LS word of position
+* - NPB.HNDL = Path number from F$Open
+* - NPB.X = MS word of position
+* - NPB.U = LS word of position
 * - Errors: E$BPNum, E$Seek
 *
 
@@ -156,7 +162,7 @@
 *
 * Error: CC Carry set  
 *        B = errcode
-*        Error code also in NBP.ERR
+*        Error code also in NPB.ERR
 *        
 NFDirect equ   *
          IFGT  Level-1
@@ -176,8 +182,8 @@ NFDirect equ   *
 ******************************
 *
 * Initialize a parameter block
-* The caller has to fill in some of NPB.RGV and NBP.PARMs
-* The file manager will fill in NBP.FMST
+* The caller has to fill in some of NPB.RGV and NPB.PARMs
+* The file manager will fill in NPB.FMST
 *
 * Entry: X = address of Device Table Entry
 *        Y = address of parameter block
@@ -194,10 +200,10 @@ NFDirect equ   *
 * Error: 
 *
 NFInitPB std   <NPB.RGV+R$D,y
-         stu   <NBP.RGV+R$U,y
+         stu   <NPB.RGV+R$U,y
          stx   <NPB.DEV,y   DTE pointer
-         clr   <NPB.PBP+0,y Linked list pointer
-         clr   <NPB.PBP+1,y
-         clr   <NBP.ERR,y   No error yet
+         clr   <NPB.ERR,y   No error yet
+         clr   NPB.BUSY,y   Mark as busy
+         inc   NPB.BUSY,y   Mark as busy
          rts
          

@@ -85,22 +85,21 @@ NRC$Inv        EQU       $80                 Set this bit to mark a config data 
 * Values of the NRC.CLKR field of the SPI
 * configuration data structure.
 *
-* The lower nybble specifies high speed or low speed SPI clock.
-* The upper nybble specifies the minimum delay from asserting
-* the SPI device select to the first clock pulse of a transfer.
-* This accommodates, e.g., interrupt response and data setup
-* times for a system in which a CPU is acting as a SPI slave.
-*
 
-* Low nybble
-CKR.LOW        SET       0                   Slow SPI clock (<1.6 MHz)
+* Low nybble - clock speed
+CKR.SPD        SET       %00000001           High / low clock speed
+CKR.LO         SET       0                   Slow SPI clock (< 1.6 MHz)
 CKR.HI         SET       1                   Fast SPI clock (rate TBD)
 
-* High nybble
+* High nybble - clock delay
+* Specifies the minimum delay from asserting the SPI device
+* select to the first clock pulse of a transfer. This
+* accommodates, e.g., interrupt response and data setup
+* times for a system in which a CPU is acting as a SPI slave.
 * This is a power of two, microseconds; subtract 1 from result
 * $0X means, 2^0 - 1 or 0us minimum time
 * $FX means, 2^15 - 1 or 32.8ms minimum time
-CKR.DLY        SET       $F0
+CKR.DLY        SET       %11110000
 
 CKR.0US        SET       $00
 CKR.1US        SET       $10
@@ -124,17 +123,24 @@ CKR.32MS       SET       $F0
 * Values of the NRC.CLKA field of the SPI
 * configuration data structure.
 *
+
+* Low nybble - SPI mode
 * This is the SPI mode, 0..3, which specifies the polarity
 * and phase of the SPI clock needed by the peripheral.
-*
-* Code assumes that these symbols map directly to the
-* values 0..3
-*
-
+CKA.MODE       SET       %00000011           SPI Mode
 CKA.MD0        SET       0                   SPI Mode 0
 CKA.MD1        SET       1                   SPI Mode 1
 CKA.MD2        SET       2                   SPI Mode 2
 CKA.MD3        SET       3                   SPI Mode 3
+
+* High nybble - Burst mode
+* If burst mode is enabled, select isn't toggled between
+* bytes, and there's no inter-byte data delay. Typically
+* this means the slavve device is very fast or uses a
+* hardware FIFO buffer initialized during the CKR.DLY.
+CKA.BDIS       SET       %00010000           Burst mode disable
+CKA.BRST       SET       $00                 Send bytes back-to-back, no select toggling
+CKA.TSEL       SET       $10                 Toggle / delay select between bytes
 
 
 *********************************************
@@ -152,13 +158,13 @@ CKA.MD3        SET       3                   SPI Mode 3
 * configurations will be R+W.
 *
 
-* Low nybble
+* Low nybble - access mode
 * Value will be a standard OS9 file access mode:
 * READ. equ %00000001
 * WRITE. equ %00000010
 * UPDAT. equ READ.+WRITE.
 
-* High nybble
+* High nybble - bit order
 ATR.ORD        SET       $F0
 
 ATR.MSB        SET       $00
@@ -176,6 +182,7 @@ ATR.LSB        SET       $10
 * driver / file manager internal coding.
 *
 
+SEL.2BIG       SET       %10000000
 
 *********************************************
 * Values of the NRC.PRI field of the SPI

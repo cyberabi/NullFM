@@ -9,7 +9,10 @@
 *   0      2019/10/31  Chris Burke
 * Coded to match prototype Burke & Burke SPI interface, using
 * SPI device class of NullFM file manager. Generally this driver
-* ignores all calls other than to the direct entry point.
+* ignores all calls other than to the direct entry point. This
+* version is "halting" in the sense that it disables interrupts
+* and controls the multi-pak for the full duration of a transfer.
+* See nullAPI for the parameter block format.
 *
 
          nam   SPI
@@ -22,6 +25,108 @@
          use   flashdefs
          endc
 
+
+******************************
+*
+* Build controls (move external)
+*
+
+XLEVEL   equ   2            Bogus level 2 flag
+FRECONF  equ   1            >0 if we should free NullFM-allocated memory on termination
+DOLSB1ST equ   1            >0 if we support LSB-first transmission
+DO1WAY   equ   0            >0 if we support one-way transmission (receive only, transmit only)
+
+
+******************************
+*
+* Things that should probably be in os9defs
+*
+
+* Bogus equates for Level 2
+
+D.DMARq2 equ   $008A        Bogus Level 2 D.DMAReq
+D.PROC2  equ   $0050        Bogus Level 2 D.PROC
+DRVMEM2  equ   $26          Level 2 drive table size
+DRVBEG2  equ   $0F          Level 2 start of drive tables
+
+*   Bogus equates for Level 1
+
+D.DMARq1 equ   $006A        Bogus Level 1 D.DMAReq
+D.PROC1  equ   $004B        Bogus Level 1 D.PROC
+DRVMEM1  equ   $18          Level 1 drive table size
+DRVBEG1  equ   $07          Level 1 start of drive tables
+
+* Generic equates
+
+    ifne    XLEVEL-1
+DMASEM   set   D.DMARq2     Level 2 DMA stuff (multi-pak)
+DPROC    set   D.PROC2      Level 2 process control stuff
+
+    else
+DMASEM   set   D.DMARq1     Level 1 DMA stuff (multi-pak)
+DPROC    set   D.PROC1      Level 1 process control stuff
+    endc
+
+
+******************************
+*
+* SPI state management constants
+*
+
+SPIMSTR  set   0            Master mode (default) 
+SPISLV   set   1            Slave mode
+
+* Transfer states - used for bit-banging or if the device allows
+* divisible transfers (e.g. interrupts enabled) / uses a timer
+* interrupt to service its transfer queue.
+XSMIDLE  set   0            SPI bus is idle (default)
+XSMSEL   set   1            SPI bus is driving select at start of transmission
+XSMSWAP1 set   2            SPI bus is clocking (8 clocks) to swap one byte of data
+XSMBRSTF set   3            SPI bus is clocking (8 clocks) to swap first byte of a burst
+XSMBRSTM set   4            SPI bus is clocking (8 clocks) to swap a middle byte of a burst
+XSMBRSTL set   5            SPI bus is clocking (8 clocks) to swap last byte of a burst
+XSMDSEL  set   6            SPI bus is waiting to remove select at end of transmission
+
+
+******************************
+*
+* Static storage offsets
+*
+* Driver maintains this state:
+*   X.XXX = Are we in slave mode (non-zero = yes)
+*   X.XXX = What data transfer state are we in (zero = idle)
+*   X.XXX = What parameter block are we processing
+*
+
+         org   V.NULLF
+SMODE    rmb   1            Non-zero if in slave mode
+XFRSTAT  rmb   1            Transfer state (always XSMIDLE in this version)
+PARAMS   rmb   2            Pointer to the parameter block currently in use (future, maybe linked list head)
+XCOUNT   rmb   2            Byte counter for an interruptible multi-byte transfer
+CFGIMG   rmb   1            In-memory image of the write-only config register
+size     equ   .            Total static storage requirement
+
+
+******************************
+*
+* Hardware addresses
+*
+
+MPAK     equ   $FF7F        Multi-PAK Addresses; value = slot-1 (0 = slot 1)
+
+         org   0
+SB.CONF  rmb   1            Configure the SPI bus and operate the select lines here
+SB.DATA  rmb   1            Read / write data at this address (write, wait, then read)
+SB.GO    rmb   1            Write anything to this address to start the transfer (sent MSB first)
+
+SBC.ISEL equ   %00001111    Active low slave selects (0..3)
+SBC.IMOD equ   %00110000    Active low SPI mode (e.g. 00 = mode 3)
+
+******************************
+*
+* Module header
+*
+
 tylg     set   Drivr+Objct   
 atrv     set   ReEnt+Rev
 rev      set   $00
@@ -29,18 +134,12 @@ edition  set   0
 
          mod   eom,name,tylg,atrv,start,size
 
-         rmb   $0000
-size     equ   .
-
 name     fcs   /SPI/
          fcb   edition
 
 ******************************
 *
 * SPI bus device driver entry point
-*
-* Entry: Y = Path descriptor pointer
-*        U = Callers register stack pointer
 *
 
 start    lbra  Init
@@ -59,23 +158,701 @@ start    lbra  Init
 *
 * Initialize the device
 * Typically called as a result of I$Attach
+* IOMan takes care of us being called only once if multiple I$Attach calls
+*
+* Entry: Y = Device descriptor pointer
+*        U = Device static storage pointer
+*        All device memory except V.PAGE and V.PORT cleared.
+*        This means by default we have SPIMSTR and XSMIDLE
+*        and an empty PARAMS linked list head.
+*        
+* Exit:  State initialized
+*
+* Error: CC Carry set  
+*        B = errcode
 *
 Init     equ   *
+* Copy the multipak slot number
+         ldb   IT.MPAK,y    Save our multipak slot number
+         stb   V.NMPAK,u
+       
+         lbsr  Semfor       Get our slot selected
+         bsr   IdleSPI
+         
+*  Generic error-free exit
+OKXIT    clrb
 
+*
+* Generic exit.  Restore MULTI-PAK to old slot
+* so floppy disk works, and release semaphore
+*
+* Entry: U = Device static storage pointer
+*        Our slot is selected
+*
+* Exit:  Preserves CC and B
+*        Release also clears the V.WAKE flag.
+*
+SPIXIT   lbra  Release      Restore old slot and return
 
+*
+* Put the hardware in a known state, and clear state variables
+*
+* Entry: U = Device static storage pointer
+*        Our slot is selected
+*        There should be no transfers in progress or queued
+*
+* Exit:  Preserves CC and B
+*
+IdleSPI  pshs  b,cc
+         lda   #(SBC.IMOD+SBC.ISEL)    No slave selected, mode 0
+         lbsr  HWConf
+         clra
+         clrb
+         std   SMODE,u      Not in slave mode, not in a transfer (should already be true)
+         std   PARAMS,u     No current parameter block (should already be true)
+         std   XCOUNT,u     No transfer byte count (should already be true)
+         puls  cc,b,pc
+         
+         
          pag
 ******************************
 *
 * Decommission the device
 * Typically called as a result of I$Detach
+* IOMan takes care of us being called only once if multiple I$Detach calls
+*
+* Entry: U = Device static storage pointer
+*        There could be a pending transfer request.
+*        
+* Exit:  All transactions released (callbacks invoked)
+*        Config block memory released (Note: Dubious. Driver allocated this)
+*
+* Error: CC Carry set  
+*        B = errcode
 *
 Term     equ   *
-         clrb
-         rts
+         pshs  u,y
+         lbsr  Semfor      Get our slot selected
          
+* For this halting version, there will never be a pending transfer.
+* For an interrupt-driven or fully-async version there could be;
+* in that case we would need to pass an error to the completion
+* callback, clear the busy flag on the parameter block, and possibly
+* convey an error to the higher-level driver. No need here.
+
+*         ldy   PARAMS,u    Parameter block for current transfer
+*          beq  Term9       No parameter block, so nothing to clean up
+*              
+** No transfer to clean up
+*Term9    equ   *
+
+    ifne FRECONF
+* DUBIOUS. Release the memory that NullFM allocated for config blocks
+* An alternative to releasing the memory might be calling back into NullFM to do it
+         ldu   2,s
+         ldd   V.NMSZ,u
+         ldu   V.NMEM,u
+          beq  NoFree
+         OS9   F$SRtMem
+NoFree   equ   *
+    endc
+         
+         puls  y,u
+         
+    ifne FRECONF
+* DUBIOUS. Mark that we've released the memory
+         clra
+         clrb         
+         std   V.NMSZ,u
+         std   V.NMEM,u
+    endc
+
+         bsr   IdleSPI     Place the SPI bus in a neutral state (aborts in-progress transaction)
+         bra   OKXIT       Release slot and return error free
+
 
          pag
 ******************************
+*
+* Direct Driver Access Handler
+*
+* Entry: B = driver function code
+*        U = driver static storage
+*        Y = address of parameter block
+*        NPB.DEV,Y = Device Table Entry pointer
+*        NPB.HNDL,Y = Device handle (SPI class)
+*        NPB.FMST,Y = Config Block
+*        We haven't claimed the multipak slot
+*
+* Exit:  Depends on function code
+*
+* Error: CC Carry set  
+*        B = errcode
+*
+* The driver modifies the parameter block to return results, and
+* invokes callbacks via pointers in the parameter block.
+*
+* Some calls are asynchronous; in this case they enqueue the parameter
+* block (via NPB.PBP and NPB.BUSY) and return immediately.
+*
+Direct   equ   *
+         cmpb  #SPI.DD
+          beq  DirTDT9     Deregistering a configuration is a no-op
+          
+         cmpb  #SPI.RDTC
+          bne  Direct1
+
+* Registering a config can return an error if we don't
+* support the parameters in the config.
+DirRDTC  equ   *
+         pshs  x
+         ldx   NPB.FMST,Y  Config block
+         lda   NRC.CLKR,x
+         bita  #CKR.SPD
+          bne  ParmErr0    We don't support high speed clock
+         bita  #CKR.DLY
+          bne  ParmErr0    We don't support clock delay
+         ldd   NRC.DATR,x
+    ifeq DOLSB1ST
+         bita  #ATR.ORD
+          bne  ParmErr0    We don't support LSB-first transmission (but can, via a swap table)
+    endc
+         cmpb  #3
+          bhi  ParmErr0    We only support 4 SPI devices
+          
+         bra   DirTDT9
+
+Direct1  cmpb  #SPI.TDT
+          beq  DirTDT
+
+* SPI.ESM and SPI.XSM are not supported (no slave mode)
+* and do not have relevant callbacks
+Direct2  equ   *
+
+* Generic bad parameter error (without callback)
+* Entry: Y = address of parameter block
+ParmErr0 puls  x
+ParmErr  comb
+         ldb   #E$Param
+         stb   NPB.ERR,y
+         rts
+
+* Data transfer; steps are:
+* - Make sure no other transfer is in progress
+* - Make sure config is hardware-compatible
+* -- Select our multipak slot
+* ---- Set up correct SPI mode (Mode 0-3, clock speed, burst)
+* ---- Set up correct SPI select
+* ---- Execute any pre-byte delay
+* ---- Send the byte
+* ---- For each remaining byte: optionally toggle select and delay (non-burst); then send byte
+* ---- Deselect
+* ---- Invoke completion callback
+* -- Restore the multipak slot
+* - Return status to caller
+
+DirTDT   equ   *
+         tst   PARAMS,U
+          beq  DirTDT1
+          
+* Another transfer or operation is in progress; we're busy
+* No need to invoke the completion callback
+BusyErr  comb
+         ldb   #E$DevBsy
+         stb   NPB.ERR,y
+         bra   SPIXIT
+
+* Config block has already been checked valid (by SPI.RDTC)
+* In the halting version of the code we don't need to track
+* transfer status in XFRSTAT or XCOUNT
+DirTDT1  sty   PARAMS,U    Save current parameter block
+
+         pshs  u,y
+
+         lbsr  Semfor      Get our slot selected
+         lbsr  DoMode      Set up correct SPI mode
+         
+         lbsr  DoSel       Get our slave selected
+
+* If we supported pre-transfer delays we'd do one here
+
+         ldd   NPB.PRM1,y  Byte count
+
+* Byte transfer loop. Vector this out to a "blitter" for the desired
+* combination of burst, delay, bit order, and read/write mode
+DirTDT2  std   XCOUNT,u
+          beq  DirTDT8     No bytes - transfer is done!
+
+
+* Transfer complete; invoke caller's callback
+DirTDT8  clrb              No error
+         ldu   NPB.PRM0,y  Callback parameter
+         jsr   [NPB.U,y]   Invoke callback
+         
+         lbsr  NoSel       Remove the SPI select
+         puls  y,u
+
+DirTDT9  clrb
+         lbra  Release     Restore slot and return
+
+
+         pag
+******************************
+*
+* Transfer blitters
+*
+* Clocking at E rate, it's 9 clocks to send a byte.
+* Clocking at E^Q rate, it's 5 clocks to send a byte.
+*
+
+*
+* E-rate, MSB-First, two-way, burst
+*
+
+*
+* Simple MSB-first Burst Blitter. <256 bytes
+*
+* Entry: B = byte count (non-zero)
+*        X = transmit buffer
+*        Y = receive buffer
+*        U = hardware pointer
+*
+
+BlitEMX  lda   ,x+
+         sta   <SB.DATA,u  Set up transmit data
+         sta   <SB.GO,u    Start the transfer
+         exg   x,x         Cycles: 8 (fetch of next instruction makes 9)
+         lda   <SB.DATA,u  Get the received data
+         sta   ,y+         Buffer it
+         decb
+          bne  BlitEMX
+         rts
+
+*
+* Simple MSB-first Burst Blitter. Any number of bytes
+*
+* Entry: D = byte count (non-zero)
+*        X = transmit buffer
+*        Y = receive buffer
+*        U = hardware pointer
+*
+
+BlBgEMX  pshs  a
+BlBgEMX1 sta   ,s
+         lda   ,x+
+         sta   <SB.DATA,u  Set up transmit data
+         sta   <SB.GO,u    Start the transfer
+         exg   x,x         Cycles: 8 (fetch of next instruction makes 9)
+         lda   <SB.DATA,u  Get the received data
+         sta   ,y+         Buffer it
+         lda   ,s
+         subd  #1
+          bne  BlBgEMX1
+         puls  a,pc
+
+    ifne DOLSB1ST
+*
+* E-rate, LSB-First, two-way, burst
+*
+
+*
+* Simple LSB-first Burst Blitter. <256 bytes
+*
+* Entry: B = byte count (non-zero)
+*        X = transmit buffer
+*        Y = receive buffer
+*        U = hardware pointer
+*
+
+BlitELX  pshs  y
+BlitELX1 sty   ,s
+         leay  BitRev0,pc
+         lda   ,x+
+         lda   a,y         Reverse bits using table
+         sta   <SB.DATA,u  Set up transmit data
+         sta   <SB.GO,u    Start the transfer
+         exg   x,x         Cycles: 8 (fetch of next instruction makes 9)
+         lda   <SB.DATA,u  Get the received data
+         lda   a,y         Reverse bits using table
+         ldy   ,s          Maintain destination pointer
+         sta   ,y+         Buffer it
+         decb
+          bne  BlitELX1
+         rts
+
+*
+* Simple LSB-first Burst Blitter. Any number of bytes
+*
+* Entry: D = byte count (non-zero)
+*        X = transmit buffer
+*        Y = receive buffer
+*        U = hardware pointer
+*
+
+BlBgELX  pshs  y,a
+BlBgELX1 sta   ,s
+         sty   1,s
+         leay  BitRev0,pc
+         lda   ,x+
+         lda   a,y         Reverse bits using table
+         sta   <SB.DATA,u  Set up transmit data
+         sta   <SB.GO,u    Start the transfer
+         exg   x,x         Cycles: 8 (fetch of next instruction makes 9)
+         lda   <SB.DATA,u  Get the received data
+         lda   a,y         Reverse bits using table
+         ldy   1,s
+         sta   ,y+         Buffer it
+         lda   ,s
+         subd  #1
+          bne  BlBgELX1
+         puls  a,y,pc
+    endc
+
+    ifne DO1WAY    
+*
+* E-rate, MSB-First, one-way, burst
+*
+
+*
+* Simple MSB-first Send-Only Burst Blitter. Any number of bytes
+*
+* Entry: D = byte count (non-zero)
+*        X = transmit buffer
+*        Y = N/A
+*        U = hardware pointer
+*
+
+BlBgEMT  tfr   d,y
+BlBgEMT1 lda   ,x+         Cycles: 6
+         sta   <SB.DATA,u  Set up transmit data
+         sta   <SB.GO,u    Start the transfer
+         bra   BlBgEMT2    Cycles: 3
+BlBgEMT2 leay  -1,y        Cycles: 6
+          bne  BlBgEMT1    Cycles: 3
+         rts
+         
+*
+* Simple MSB-first Receive-Only Burst Blitter. Any number of bytes
+*
+* Entry: D = byte count (non-zero)
+*        X = pointer to constant byte to send (or NULL for 0)
+*        Y = receive buffer
+*        U = hardware pointer
+*
+
+BlBgEMR  pshs  d
+         clra
+         cpx   #0
+          beq  BlBgEMR1
+         lda   ,x          Fetch constant byte to send
+BlBgEMR1 puls  x           Byte count in x, constant byte in a
+
+BlBgEMR2 sta   <SB.DATA,u  Set up constant transmit data
+         sta   <SB.GO,u    Start the transfer
+         exg   x,x         Cycles: 8 (fetch of next instruction makes 9)
+         ldb   <SB.DATA,u
+         stb   ,y+
+         leax  -1,x
+          bne  BlBgEMR2
+         rts
+         
+      ifne DOLSB1ST
+*
+* Simple LSB-first Send-Only Burst Blitter. Any number of bytes
+*
+* Entry: D = byte count (non-zero)
+*        X = transmit buffer
+*        Y = N/A
+*        U = hardware pointer
+*
+
+BlBgELT  pshs  a
+         leay  BitRev0,pc
+BlBgELT1 sta   ,s
+         lda   ,x+
+         lda   a,y         Reverse bits using table
+         sta   <SB.DATA,u  Set up transmit data
+         sta   <SB.GO,u    Start the transfer
+         lda   ,s          Cycles: 4
+         subd  #1          Cycles: 4
+          bne  BlBgELT1    Cycles: 3
+         puls  a,pc
+         
+*
+* Simple LSB-first Receive-Only Burst Blitter. Any number of bytes
+*
+* Entry: D = byte count (non-zero)
+*        X = pointer to constant byte to send (or NULL for 0)
+*        Y = receive buffer
+*        U = hardware pointer
+*
+
+BlBgELR  pshs  d
+         clra
+         cpx   #0
+          beq  BlBgELR1
+         lda   ,x          Fetch constant byte to send
+         leax  BitRev0,pc  Bit-reverse it
+         lda   a,x
+BlBgELR1 ldx   ,s          Byte count in x, constant byte in a
+
+BlBgELR2 sta   <SB.DATA,u  Set up constant transmit data
+         sta   <SB.GO,u    Start the transfer
+         stx   ,s          Cycles: 5
+         leax  BitRev0,pc  Cycles: 5
+         ldb   <SB.DATA,u
+         ldb   b,x         Bit reverse received data
+         stb   ,y+         Buffer it
+         ldx   ,s
+         leax  -1,x
+          bne  BlBgEMR2
+         puls  d,pc
+      endc
+
+    endc
+    
+         
+         page
+******************************
+*
+* Multipak / "DMA" management
+*
+
+*
+*   Select HD controller slot SPARESEL in multi-Pak.
+*
+*   Enter w/ Reg-U -> static storage
+*
+*   The active ROM/CART slot is preserved.
+*
+*   This routine is normally called with interrupts enabled.
+*   It disables them.
+*
+MySlot   equ   *
+         orcc  #$50         No interrupts during transaction
+         bsr   SavSlot      Save old slot #, get to A
+         anda  #%11110000
+         ora   V.NMPAK,U    Use device's slot #
+         sta   >MPAK
+         rts                exit with interrupts disabled
+
+*   Utility to save old slot
+*   Preserves B:X
+
+SavSlot  lda   >MPAK
+         sta   V.SMPAK,U    save the old slot here
+         rts
+
+*
+*   Restore original slot V.SMPAK in multi-PAK.
+*
+*   Enter w/ Reg-U -> static storage
+*
+*   This routine preserves carry and B, since it is called
+*   before returning an error code.
+*
+*   The active ROM slot and CART interrupt is also preserved.
+*
+*   This routine is always called with interrupts disabled.
+*   (or with interrupts enabled and our slot selected already)
+*   It always enables interrupts.
+*
+*   Note that this routine does *NOT* clear the DMA semaphore
+*   unless entered at Release.  This is only done once, at 
+*   the very end of each transfer.
+*
+Release  orcc  #$50         Force no interrupts during updates
+
+         lda   #0           preserve carry
+         sta   >DMASEM      Zero OS9 level-dependent semaphore
+
+OldSlot  orcc  #$50         Force no interrupts during update
+
+         lda   V.NMPAK,U    Recover old slot
+         sta   >MPAK
+         
+         lda   #0           Preserve carry
+         sta   V.WAKE,U     Free anyone waiting on us.
+
+         andcc #$AF         Enable interrupts
+         rts
+
+*
+*   Wait for end of other processes multipak use.  This is
+*   indicated by semaphore $6A = 0.  Grab semaphore
+*   as soon as it frees up.
+*
+*   Enter w/ Reg-U -> static storage
+*
+*   Assumes our slot is selected at entry, and interrupts
+*   are enabled.
+*
+*   Always exits with slot 3 selected and interrupts disabled.
+*
+Semfor   pshs  U,X,Y,B,A,CC
+
+*  Wait for semaphore loop . . .
+Sem0     orcc  #$50         No interrupts!
+
+         tst   >DMASEM      Check OS9 level-dependent semaphore
+          bne  W6.SLP
+
+*  Semaphore is free.  Grab it.
+
+         dec   >DMASEM      Grab OS9 level-dependent semaphore
+         puls  CC,A,B,Y,X,U restore interrupts, etc
+         bra   MySlot        and select SPI bus MPAK slot
+
+*  Semaphore is busy.  Sleep a bit.
+W6.SLP   bsr   TikNap       Surrender the processor
+         bra   Sem0
+
+*
+*   Force slot 4, enable interrupts,
+*   Sleep for the rest of this tick.
+*
+TikNap   pshs  X            Save entry X
+         bsr   OldSlot      Select old slot, enable interrupts
+
+    ifne    (XLEVEL-1)
+* The SPI driver is always called from system space.
+* If there's any chance that the SPI device is used
+* as part of the boot sequence, don't sleep to keep
+* that SPI transaction indivisible process-wise.
+         ldx   <D.SYSPRC
+         cmpx  <DPROC
+          beq  TikXit       Called from system space; no sleep
+    endc
+
+         ldx   #1
+         OS9   F$Sleep      Give up the rest of this tick
+
+TikXit   puls  X,PC
+
+
+         page
+******************************
+*
+* Utilities to manipulate SPI config register
+*
+
+* Turn on the SPI select from the config block
+* 
+* Entry: U = driver static storage
+*        Y = address of parameter block
+DoSel    pshs  x,a,cc
+         orcc  #50
+         ldx   NPB.FMST,y
+         lda   NRC.SEL,x
+         anda  #3
+         leax  SelTbl,pc
+         lda   a,x         Load the active-low select pattern    
+         pshs  a
+         lda   CFGIMG,u
+         anda  #^SBC.ISEL
+
+HWC1     ora   ,s+
+         bsr   HWConf
+         puls  cc,a,x,pc
+
+SelTbl   fcb   $0E,$0D,$0B,$07
+         
+* Turn off all of the SPI selects
+* 
+* Entry: U = driver static storage
+*        Y = address of parameter block
+NoSel    pshs  x,a,cc
+         orcc  #50
+         lda   CFGIMG,u
+         ora   #SBC.ISEL   Set all active-low selects high
+         bsr   HWConf
+         puls  cc,a,x,pc
+         
+* Set the SPI mode from the config block
+* 
+* Entry: U = driver static storage
+*        Y = address of parameter block
+DoMode   pshs  x,a,cc
+         orcc  #50
+         ldx   NPB.FMST,y
+         lda   NRC.CLKA,x
+         coma              Mode selects are active-low
+         anda  #CKA.MODE
+         asla
+         asla
+         asla
+         asla
+         pshs  a
+         lda   CFGIMG,u
+         anda  #^SBC.IMOD
+         bra   HWC1
+
+* Update the whole register
+*
+* Entry: A = desired config register value
+*        U = driver static storage
+HWConf   pshs  x,cc
+         orcc  #50
+         ldx   V.PORT,u     Hardware address
+         sta   SB.CONF,x    Set config register
+         sta   CFGIMG,u     (image for write-only hardware)
+         puls  cc,x,pc
+
+
+    ifne DOLSB1ST
+         page
+******************************
+*
+* Bit reversal table for LSB-first transmission
+* Accumulator-indexed addresses are two's complement
+* e.g.  leay   BitRev0,pc
+*       lda    a,y
+*
+
+* Signed offset -128, increasing
+BitRevM  fcb   $01,$81,$41,$c1,$21,$a1,$61,$e1
+         fcb   $11,$91,$51,$d1,$31,$b1,$71,$f1
+         fcb   $09,$89,$49,$c9,$29,$a9,$69,$e9
+         fcb   $19,$99,$59,$d9,$39,$b9,$79,$f9
+         fcb   $05,$85,$45,$c5,$25,$a5,$65,$e5
+         fcb   $15,$95,$55,$d5,$35,$b5,$75,$f5
+         fcb   $0d,$8d,$4d,$cd,$2d,$ad,$6d,$ed
+         fcb   $1d,$9d,$5d,$dd,$3d,$bd,$7d,$fd
+         fcb   $03,$83,$43,$c3,$23,$a3,$63,$e3
+         fcb   $13,$93,$53,$d3,$33,$b3,$73,$f3
+         fcb   $0b,$8b,$4b,$cb,$2b,$ab,$6b,$eb
+         fcb   $1b,$9b,$5b,$db,$3b,$bb,$7b,$fb
+         fcb   $07,$87,$47,$c7,$27,$a7,$67,$e7
+         fcb   $17,$97,$57,$d7,$37,$b7,$77,$f7
+         fcb   $0f,$8f,$4f,$cf,$2f,$af,$6f,$ef
+         fcb   $1f,$9f,$5f,$df,$3f,$bf,$7f,$ff
+
+* Signed offset 0, increasing
+BitRev0  fcb   $00,$80,$40,$c0,$20,$a0,$60,$e0
+         fcb   $10,$90,$50,$d0,$30,$b0,$70,$f0
+         fcb   $08,$88,$48,$c8,$28,$a8,$68,$e8
+         fcb   $18,$98,$58,$d8,$38,$b8,$78,$f8
+         fcb   $04,$84,$44,$c4,$24,$a4,$64,$e4
+         fcb   $14,$94,$54,$d4,$34,$b4,$74,$f4
+         fcb   $0c,$8c,$4c,$cc,$2c,$ac,$6c,$ec
+         fcb   $1c,$9c,$5c,$dc,$3c,$bc,$7c,$fc
+         fcb   $02,$82,$42,$c2,$22,$a2,$62,$e2
+         fcb   $12,$92,$52,$d2,$32,$b2,$72,$f2
+         fcb   $0a,$8a,$4a,$ca,$2a,$aa,$6a,$ea
+         fcb   $1a,$9a,$5a,$da,$3a,$ba,$7a,$fa
+         fcb   $06,$86,$46,$c6,$26,$a6,$66,$e6
+         fcb   $16,$96,$56,$d6,$36,$b6,$76,$f6
+         fcb   $0e,$8e,$4e,$ce,$2e,$ae,$6e,$ee
+         fcb   $1e,$9e,$5e,$de,$3e,$be,$7e,$fe
+    endc
+         
+         
+         pag
+******************************
+*
+* Non-supported Driver Calls (return error)
+*
+
 *
 * Read from the device
 * This is a pass-through from NullFM.
@@ -85,8 +862,6 @@ Term     equ   *
 Read     equ   *
 
 
-         pag
-******************************
 *
 * Write to the device
 * This is a pass-through from NullFM.
@@ -96,8 +871,6 @@ Read     equ   *
 Write    equ   *
 
 
-         pag
-******************************
 *
 * Get status of the device
 * This is a pass-through from NullFM.
@@ -107,8 +880,6 @@ Write    equ   *
 GetStat  equ   *
 
 
-         pag
-******************************
 *
 * Set status of the device
 * This is a pass-through from NullFM.
@@ -122,32 +893,6 @@ SetStat  equ   *
          rts
          
          
-         pag
-******************************
-*
-* Direct Driver Access Handler
-*
-* Entry: B = driver function code
-*        Y = address of parameter block
-*        NPB.DEV,Y = Device Table Entry pointer
-*        NPB.HNDL,Y = Device handle (SPI class)
-*        NPB.DEV->V$STAT = Driver static storage
-*
-* Exit:  Depends on function code
-*
-* Error: CC Carry set  
-*        B = errcode
-*
-* This driver modifies the parameter block to return results, and
-* invokes callbacks via pointers in the parameter block.
-*
-* Some calls are asynchronous; in this case they enqueue the parameter
-* block (via NPB.PBP and NPB.BUSY) and return immediately.
-*
-Direct   equ   *
-         rts
-         
-
          emod
 eom      equ   *
          end
