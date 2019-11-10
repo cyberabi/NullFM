@@ -1,0 +1,64 @@
+********************************************************************
+* SPIBUS - OS-9 SPI Bus Device Descriptor
+*
+* $Id$
+*
+* Edt/Rev  YYYY/MM/DD  Modified by
+* Comment
+* ------------------------------------------------------------------
+*   0      2019/11/10  Chris Burke
+* Coded
+
+*
+* 'use' this file from a file that includes most defs and
+* sets build options.
+*
+* Currently supported:
+* XLEVEL   2 = Build for Level 2; 1 = Build for Level 1
+* SPIADDR  Hardware address of SPI port (e.g. $FF40)
+* SPIMPAK  Multipak slot number - 1 (e.g. 2 = slot 3)
+*
+
+******************************
+*
+* Things that should probably be in os9defs
+*
+
+    ifne XLEVEL-1
+XHW.Page set   $07
+    else
+XHW.Page set   $FF
+    endc
+    
+    
+******************************
+*
+* Module header
+*
+
+tylg     set   Devic+Objct
+atrv     set   ReEnt+rev
+rev      set   $00
+
+         mod   eom,name,tylg,atrv,mgrnam,drvnam
+
+         fcb   UPDAT.     mode byte
+         fcb   XHW.Page   extended controller address
+         fdb   SPIADDR    physical controller address
+         fcb   initsize-*-1 initilization table size
+         fcb   DT.NULL    device type:0=scf,1=rbf,2=pipe,3=scf,4=sbf,5=null
+         fcb   NDC.SPI    NULL device class
+         fcb   UPDAT.     Access mode (possibly redundant)
+         fcb   SPIMPAK    Multipak slot number - 1 (e.g. 2 = slot 3)
+         fdb   0          Reserved - NULL
+         fdb   0          Reserved - NULL
+         fcb   4          Number of config blocks to allocate (one per slave supported)
+initsize equ   *
+
+name     fcs   /SPIBUS/
+mgrnam   fcs   /NULLFM/
+drvnam   fcs   /SPI/
+
+         emod  
+eom      equ   *
+         end   

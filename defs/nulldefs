@@ -45,6 +45,10 @@ E$Param        RMB       1                   Alias for OSK error code used in DA
                RMB       1
 V$DRIVEX       RMB       2                   Device Driver execution address
 V$FMGREX       RMB       2                   File Manager execution address
+
+HW.Page        SET       $07                 Hardware page for CoCo OS9 L2
+               ELSE
+HW.Page        SET       $FF                 Hardware page for CoCo OS9 L1
                ENDC
                
                

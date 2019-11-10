@@ -12,3 +12,8 @@
 ./asm.sh src/spi.msbxlsb.c2
 ./asm.sh src/spi.msbxlsb.l1
 ./asm.sh src/spi.msbxlsb.l1.c2
+./asm.sh src/spibus.disto
+./asm.sh src/spibus.slot3
+./asm.sh src/spibus.disto.l1
+./asm.sh src/spibus.slot3.l1
+

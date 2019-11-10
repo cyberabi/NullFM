@@ -1,0 +1,28 @@
+********************************************************************
+* SPIBUS - Device Descriptor for Burke & Burke SPI bus (Slot 3, Level 2)
+*
+* $Id$
+*
+* Edt/Rev  YYYY/MM/DD  Modified by
+* Comment
+* ------------------------------------------------------------------
+*   0      2019/11/10  Chris Burke
+* Coded
+
+         nam   SPIBUS
+         ttl   Burke & Burke SPI bus (Slot 3, Level 2)
+
+         ifp1  
+         use   defsfile
+         use   nulldefs
+         use   spidefs
+         use   flashdefs
+         endc  
+
+* Conditional build
+XLEVEL   set   2          Level 2
+SPIADDR  set   $FF40      Spare Select
+SPIMPAK  set   2          Slot 3
+
+* Include the common code
+         use   ../src/spibus

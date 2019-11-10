@@ -1,0 +1,29 @@
+********************************************************************
+* SPIBUS - Device Descriptor for Burke & Burke SPI bus (DISTO Expansion Port, Level 1)
+*
+* $Id$
+*
+* Edt/Rev  YYYY/MM/DD  Modified by
+* Comment
+* ------------------------------------------------------------------
+*   0      2019/11/10  Chris Burke
+* Coded
+
+         nam   SPIBUS
+         ttl   Burke & Burke SPI bus (DISTO Expansion Port, Level 1)
+
+
+         ifp1  
+         use   defsfile
+         use   nulldefs
+         use   spidefs
+         use   flashdefs
+         endc  
+
+* Conditional build
+XLEVEL   set   1          Level 1
+SPIADDR  set   $FF50      DISTO MEB Select
+SPIMPAK  set   3          Slot 4
+
+* Include the common code
+         use   ../src/spibus

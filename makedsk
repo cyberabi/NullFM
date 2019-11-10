@@ -1,0 +1,21 @@
+#!/bin/bash
+os9 format -e disks/nullfm.dsk
+os9 copy modules/nullFM disks/nullfm.dsk,nullFM
+os9 copy modules/spi.msb disks/nullfm.dsk,spi.msb
+os9 copy modules/spi.msb.c2 disks/nullfm.dsk,spi.msb.c2
+os9 copy modules/spi.msb.l1 disks/nullfm.dsk,spi.msb.l1
+os9 copy modules/spi.msb.l1.c2 disks/nullfm.dsk,spi.msb.l1.c2
+os9 copy modules/spi.msblsb disks/nullfm.dsk,spi.msblsb
+os9 copy modules/spi.msblsb.c2 disks/nullfm.dsk,spi.msblsb.c2
+os9 copy modules/spi.msblsb.l1 disks/nullfm.dsk,spi.msblsb.l1
+os9 copy modules/spi.msblsb.l1.c2 disks/nullfm.dsk,spi.msblsb.l1.c2
+os9 copy modules/spi.msbxlsb disks/nullfm.dsk,spi.msbxlsb
+os9 copy modules/spi.msbxlsb.c2 disks/nullfm.dsk,spi.msbxlsb.c2
+os9 copy modules/spi.msbxlsb.l1 disks/nullfm.dsk,spi.msbxlsb.l1
+os9 copy modules/spi.msbxlsb.l1.c2 disks/nullfm.dsk,spi.msbxlsb.l1.c2
+os9 copy modules/spibus.disto disks/nullfm.dsk,spibus.disto
+os9 copy modules/spibus.slot3 disks/nullfm.dsk,spibus.slot3
+os9 copy modules/spibus.disto.l1 disks/nullfm.dsk,spibus.disto.l1
+os9 copy modules/spibus.slot3.l1 disks/nullfm.dsk,spibus.slot3.l1
+os9 dir disks/nullfm.dsk
+
