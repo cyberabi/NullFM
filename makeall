@@ -1,0 +1,14 @@
+#!/bin/bash
+./asm.sh src/nullFM
+./asm.sh src/spi.msb
+./asm.sh src/spi.msb.c2
+./asm.sh src/spi.msb.l1
+./asm.sh src/spi.msb.l1.c2
+./asm.sh src/spi.msblsb
+./asm.sh src/spi.msblsb.c2
+./asm.sh src/spi.msblsb.l1
+./asm.sh src/spi.msblsb.l1.c2
+./asm.sh src/spi.msbxlsb
+./asm.sh src/spi.msbxlsb.c2
+./asm.sh src/spi.msbxlsb.l1
+./asm.sh src/spi.msbxlsb.l1.c2
