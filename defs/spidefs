@@ -65,9 +65,9 @@ SPI.TDT        RMB       1                   Transfer Data to and from the Targe
 *
                ORG       0
 NRC.HNDL       RMB       1                   Handle for this config block
-NRC.CLKR       RMB       1                   Clock rate for slave device (1=High, 0=Low)
-NRC.CLKA       RMB       1                   +Clock attributes for slave device (Mode 0..3)
-NRC.DATR       RMB       1                   Attributes for slave device data transfer (RW)
+NRC.CLKR       RMB       1                   Clock rate for slave device (1=High, 0=Low) (inter-byte delay)
+NRC.CLKA       RMB       1                   +Clock attributes for slave device (Mode 0..3) (burst)
+NRC.DATR       RMB       1                   Attributes for slave device data transfer (RW) and bit order
 NRC.SEL        RMB       1                   +SPI select number (0..127); MSB set = invalid (6809 specific)
 NRC.PRI        RMB       1                   Priority for slave device data transfer (Unused, queuing)
 NRC.ENAF       RMB       2                   Pointer to slave_enable() callback function in the higher-level driver.

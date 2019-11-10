@@ -1,0 +1,47 @@
+********************************************************************
+*
+* SPI - OS-9 SPI Bus Device Driver
+*
+* This version is for OS9 Level 1
+* This version supports MSB-first and LSB-first transmission
+* LSB-first transmission is implemented with a lookup table (fast)
+* This version does not support unidirectional transfers
+*
+* $Id$
+*
+* Edt/Rev  YYYY/MM/DD  Modified by
+* Comment
+* ------------------------------------------------------------------
+*   0      2019/11/xx0831  Chris Burke
+* Coded
+*
+
+         nam   SPI
+         ttl   OS-9 SPI Bus Device Driver - OS9 L1; No Uni; MSB / LSB
+
+         ifp1
+         use   defsfile
+         use   nulldefs
+         use   spidefs
+         use   flashdefs
+         endc
+
+
+******************************
+*
+* Build controls
+*
+
+XLEVEL   set   1            2 = Build for Level 2; 1 = Build for Level 1
+XSPDMUL  set   2            Machine's E clock speed; 1 = 0.89488625 MHz; 2 = 2x; 3 = 3x; etc
+FRECONF  set   1            >0 if we should free NullFM-allocated memory on termination (typically 1)
+DOLSB1ST set   1            >0 if we support LSB-first transmission
+XXLSB1ST set   1            >0 to accellerate LSB-first transmission using a lookup table
+DO1WAY   set   0            >0 if we support one-way transmission (receive only, transmit only)
+
+* Future:
+OPTBLIT  set   0            >0 if we support optimized blitters
+
+* Include the driver body
+         use  ../src/SPI
+
