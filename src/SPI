@@ -32,9 +32,11 @@
 *
 
 XLEVEL   equ   2            Bogus level 2 flag
+XSPDMUL  equ   2            Clock speed multiplier for delays (1 = 0.89488625 MHz)
 FRECONF  equ   1            >0 if we should free NullFM-allocated memory on termination
 DOLSB1ST equ   1            >0 if we support LSB-first transmission
 DO1WAY   equ   0            >0 if we support one-way transmission (receive only, transmit only)
+OPTBLIT  equ   0            >0 if we support optimized blitters
 
 
 ******************************
@@ -369,12 +371,13 @@ DirTDT1  sty   PARAMS,U    Save current parameter block
 
          pshs  u,y
 
-         lbsr  Semfor      Get our slot selected
+         lbsr  Semfor      Get our slot selected (disables interrupts)
          lbsr  DoMode      Set up correct SPI mode
          
          lbsr  DoSel       Get our slave selected
 
 * If we supported pre-transfer delays we'd do one here
+         lbsr  Delay
 
          ldd   NPB.PRM1,y  Byte count
 
@@ -383,6 +386,8 @@ DirTDT1  sty   PARAMS,U    Save current parameter block
 DirTDT2  std   XCOUNT,u
           beq  DirTDT8     No bytes - transfer is done!
 
+* Here vector out to the correct "blitter" for the transfer
+         lbsr  Transfer
 
 * Transfer complete; invoke caller's callback
 DirTDT8  clrb              No error
@@ -396,6 +401,57 @@ DirTDT9  clrb
          lbra  Release     Restore slot and return
 
 
+* Select the correct "blitter" for the data transfer,
+* and do it.
+*
+* Entry: U = Device static storage
+*        Y = address of parameter block
+*        NPB.FMST,Y = Config Block
+*        Multi-pak points at our slot
+
+Transfer pshs  u,y,x,d,cc
+         puls  cc,d,x,y,u,pc
+
+* Delay between asserting the slave select and
+* starting the data transfer.
+*
+* Entry: Y = address of parameter block
+*        NPB.FMST,Y = Config Block
+*        NRC.CLKR & CKR.DLY = Delay code
+*        Multi-pak points at our slot
+*        Interrupts are disabled
+*
+
+Delay    pshs  u,y,x,d,cc  Cycles: 14
+         ldx   NPB.FMST,y  Cycles: 6 Point to config block
+         ldb   NRC.CLKR,x  Cycles: 5 Clock rate
+         andb  #CKR.DLY    Cycles: 2 Delay field
+         lsrb              Cycles: 2
+         lsrb              Cycles: 2
+         lsrb              Cycles: 2 Double-byte offset
+         leay  DlyTab,pc   Cycles: 5
+         ldd   b,y         Cycles: 5 16-bit delay value
+* We've already done 43 cycles before this
+Dly1     subd  #1          Cycles: 4
+          bne  Dly1        Cycles: 3
+* Another bunch of cycles after
+         puls  cc,d,x,y,u,pc Cycles: 16
+
+    ifeq XSPDMUL-2
+* Values here depend on clock speed and CPU
+* These are based on CoCo 3 clock speed of
+* 1.7897725 MHz and a 7-cycle loop
+DlyTab   fdb   $0001,$0001,$0001,$0001,$0001,$0001,$0007,$0017
+         fdb   $0037,$0077,$00F7,$01F7,$03F7,$07F7,$0FF7,$1FF7
+    else
+* Values here depend on clock speed and CPU
+* These are based on CoCo 2 clock speed of
+* 0.89488625 MHz and a 7-cycle loop
+DlyTab   fdb   $0001,$0001,$0001,$0001,$0001,$0001,$0001,$0007
+         fdb   $0017,$0037,$0077,$00F7,$01F7,$03F7,$07F7,$0FF7
+    endc
+    
+    
          pag
 ******************************
 *
@@ -405,92 +461,154 @@ DirTDT9  clrb
 * Clocking at E^Q rate, it's 5 clocks to send a byte.
 *
 
+
+*
+* Common blitter setup code
+*
+* Entry: U = Device static storage
+*        Y = Parameter Block Pointer
+*
+* Exit:  U = Hardware pointer
+*        Y = Receive buffer pointer
+*        X = transfer buffer pointer
+*        D = byte count (non-zero)
+*
+BlitComX ldx   NPB.X,y     Point to transmit buffer
+         ldd   NPB.PRM1,y  Get transfer byte count
+         ldu   V.PORT,u    Point to static storage
+         ldy   NPB.Y,y     Point to receive buffer
+         rts
+         
+         
+*
+* E-rate, MSB-First, two-way, non-burst
+* This is a general-purpose blitter and deliberately slow
+* It toggles the slave select, with delay, between bytes
+*
+* Entry: U = Device static storage
+*        Y = Parameter Block Pointer
+*
+* Exit:  D,X modified
+*        Data transfered
+*
+BltSlwMX pshs  u,y
+         bsr   BlitComX    Set up regs
+         pshs  a
+         
+BSMX1    lda   x+
+         sta   <SB.DATA,u  Set up transmit data
+         sta   <SB.GO,u    Start the transfer
+         exg   x,x         Cycles: 8 (fetch of next instruction makes 9)
+         lda   <SB.DATA,u  Get the received data
+         sta   ,y+         Buffer it
+         
+         lda   ,s
+         subd  #1          Update byte count
+          beq  BSMX9
+         sta   ,s
+         
+         pshs  u,y
+         ldy   4+1,s       Recover parameter block pointer
+         ldu   4+3,s       Recover device static storage
+         lbsr  NoSel       Turn slave select off
+         lbsr  Sel         Turn slave slect on
+         lbsr  Delay       Delay before clocking
+         puls  y,u
+         bra   BSMX1       Continue transfering bytes
+          
+BSMX9    puls  a,y,u,pc
+
+        
 *
 * E-rate, MSB-First, two-way, burst
+* This is a general-purpose blitter
 *
-
+* Entry: U = Device static storage
+*        Y = Parameter Block Pointer
 *
-* Simple MSB-first Burst Blitter. <256 bytes
+* Exit:  D,X modified
+*        Data transfered
 *
-* Entry: B = byte count (non-zero)
-*        X = transmit buffer
-*        Y = receive buffer
-*        U = hardware pointer
-*
-
-BlitEMX  lda   ,x+
+BltBrtMX pshs  u,y
+         bsr   BlitComX    Set up regs
+         pshs  a
+         
+BBMX1    sta   ,s          (MSB of byte count)
+         lda   x+
          sta   <SB.DATA,u  Set up transmit data
          sta   <SB.GO,u    Start the transfer
          exg   x,x         Cycles: 8 (fetch of next instruction makes 9)
          lda   <SB.DATA,u  Get the received data
          sta   ,y+         Buffer it
-         decb
-          bne  BlitEMX
-         rts
-
-*
-* Simple MSB-first Burst Blitter. Any number of bytes
-*
-* Entry: D = byte count (non-zero)
-*        X = transmit buffer
-*        Y = receive buffer
-*        U = hardware pointer
-*
-
-BlBgEMX  pshs  a
-BlBgEMX1 sta   ,s
-         lda   ,x+
-         sta   <SB.DATA,u  Set up transmit data
-         sta   <SB.GO,u    Start the transfer
-         exg   x,x         Cycles: 8 (fetch of next instruction makes 9)
-         lda   <SB.DATA,u  Get the received data
-         sta   ,y+         Buffer it
+         
          lda   ,s
-         subd  #1
-          bne  BlBgEMX1
-         puls  a,pc
+         subd  #1          Update byte count
+          bne  BBMX1
+          
+         puls  a,y,u,pc
 
-    ifne DOLSB1ST
+
+  ifne DOLSB1ST
+*
+* E-rate, LSB-First, two-way, non-burst
+* This is a general-purpose blitter and deliberately slow
+* It toggles the slave select, with delay, between bytes
+*
+* Entry: U = Device static storage
+*        Y = Parameter Block Pointer
+*
+* Exit:  D,X modified
+*        Data transfered
+*
+BltSlwLX pshs  u,y
+         bsr   BlitComX    Set up regs
+         pshs  y,a
+         
+BSLX1    leay  BitRev0,pc  Bit-reverse table
+         lda   x+
+         lda   a,y         Bit-reverse send data
+         sta   <SB.DATA,u  Set up transmit data
+         sta   <SB.GO,u    Start the transfer
+         exg   x,x         Cycles: 8 (fetch of next instruction makes 9)
+         lda   <SB.DATA,u  Get the received data
+         lda   a,y         Bit-reverse receive data
+         ldy   1,s         Recover receive buffer pointer
+         sta   ,y+         Buffer it
+         sty   1,s         (receive buffer pointer)
+         
+         lda   ,s
+         subd  #1          Update byte count
+          beq  BSLX9
+         sta   ,s          (MSB of byte count)
+         
+         pshs  u
+         ldy   2+3+0,s     Recover parameter block pointer
+         ldu   2+3+2,s     Recover device static storage
+         lbsr  NoSel       Turn slave select off
+         lbsr  Sel         Turn slave slect on
+         lbsr  Delay       Delay before clocking
+         puls  u
+         bra   BSLX1       Continue transfering bytes
+          
+BSLX9    leas  3,s
+         puls  y,u,pc
+         
+         
 *
 * E-rate, LSB-First, two-way, burst
+* This is a general-purpose blitter
 *
-
+* Entry: U = Device static storage
+*        Y = Parameter Block Pointer
 *
-* Simple LSB-first Burst Blitter. <256 bytes
+* Exit:  D,X modified
+*        Data transfered
 *
-* Entry: B = byte count (non-zero)
-*        X = transmit buffer
-*        Y = receive buffer
-*        U = hardware pointer
-*
-
-BlitELX  pshs  y
-BlitELX1 sty   ,s
-         leay  BitRev0,pc
-         lda   ,x+
-         lda   a,y         Reverse bits using table
-         sta   <SB.DATA,u  Set up transmit data
-         sta   <SB.GO,u    Start the transfer
-         exg   x,x         Cycles: 8 (fetch of next instruction makes 9)
-         lda   <SB.DATA,u  Get the received data
-         lda   a,y         Reverse bits using table
-         ldy   ,s          Maintain destination pointer
-         sta   ,y+         Buffer it
-         decb
-          bne  BlitELX1
-         rts
-
-*
-* Simple LSB-first Burst Blitter. Any number of bytes
-*
-* Entry: D = byte count (non-zero)
-*        X = transmit buffer
-*        Y = receive buffer
-*        U = hardware pointer
-*
-
-BlBgELX  pshs  y,a
-BlBgELX1 sta   ,s
+BltBrtLX pshs  u,y
+         bsr   BlitComX    Set up regs
+         pshs  y,a
+         
+BBLX1    sta   ,s
          sty   1,s
          leay  BitRev0,pc
          lda   ,x+
@@ -504,114 +622,13 @@ BlBgELX1 sta   ,s
          sta   ,y+         Buffer it
          lda   ,s
          subd  #1
-          bne  BlBgELX1
+          bne  BBLX1
+          
+         leas  3,s
          puls  a,y,pc
-    endc
+  endc 
 
-    ifne DO1WAY    
-*
-* E-rate, MSB-First, one-way, burst
-*
 
-*
-* Simple MSB-first Send-Only Burst Blitter. Any number of bytes
-*
-* Entry: D = byte count (non-zero)
-*        X = transmit buffer
-*        Y = N/A
-*        U = hardware pointer
-*
-
-BlBgEMT  tfr   d,y
-BlBgEMT1 lda   ,x+         Cycles: 6
-         sta   <SB.DATA,u  Set up transmit data
-         sta   <SB.GO,u    Start the transfer
-         bra   BlBgEMT2    Cycles: 3
-BlBgEMT2 leay  -1,y        Cycles: 6
-          bne  BlBgEMT1    Cycles: 3
-         rts
-         
-*
-* Simple MSB-first Receive-Only Burst Blitter. Any number of bytes
-*
-* Entry: D = byte count (non-zero)
-*        X = pointer to constant byte to send (or NULL for 0)
-*        Y = receive buffer
-*        U = hardware pointer
-*
-
-BlBgEMR  pshs  d
-         clra
-         cpx   #0
-          beq  BlBgEMR1
-         lda   ,x          Fetch constant byte to send
-BlBgEMR1 puls  x           Byte count in x, constant byte in a
-
-BlBgEMR2 sta   <SB.DATA,u  Set up constant transmit data
-         sta   <SB.GO,u    Start the transfer
-         exg   x,x         Cycles: 8 (fetch of next instruction makes 9)
-         ldb   <SB.DATA,u
-         stb   ,y+
-         leax  -1,x
-          bne  BlBgEMR2
-         rts
-         
-      ifne DOLSB1ST
-*
-* Simple LSB-first Send-Only Burst Blitter. Any number of bytes
-*
-* Entry: D = byte count (non-zero)
-*        X = transmit buffer
-*        Y = N/A
-*        U = hardware pointer
-*
-
-BlBgELT  pshs  a
-         leay  BitRev0,pc
-BlBgELT1 sta   ,s
-         lda   ,x+
-         lda   a,y         Reverse bits using table
-         sta   <SB.DATA,u  Set up transmit data
-         sta   <SB.GO,u    Start the transfer
-         lda   ,s          Cycles: 4
-         subd  #1          Cycles: 4
-          bne  BlBgELT1    Cycles: 3
-         puls  a,pc
-         
-*
-* Simple LSB-first Receive-Only Burst Blitter. Any number of bytes
-*
-* Entry: D = byte count (non-zero)
-*        X = pointer to constant byte to send (or NULL for 0)
-*        Y = receive buffer
-*        U = hardware pointer
-*
-
-BlBgELR  pshs  d
-         clra
-         cpx   #0
-          beq  BlBgELR1
-         lda   ,x          Fetch constant byte to send
-         leax  BitRev0,pc  Bit-reverse it
-         lda   a,x
-BlBgELR1 ldx   ,s          Byte count in x, constant byte in a
-
-BlBgELR2 sta   <SB.DATA,u  Set up constant transmit data
-         sta   <SB.GO,u    Start the transfer
-         stx   ,s          Cycles: 5
-         leax  BitRev0,pc  Cycles: 5
-         ldb   <SB.DATA,u
-         ldb   b,x         Bit reverse received data
-         stb   ,y+         Buffer it
-         ldx   ,s
-         leax  -1,x
-          bne  BlBgEMR2
-         puls  d,pc
-      endc
-
-    endc
-    
-         
          page
 ******************************
 *
@@ -740,6 +757,10 @@ TikXit   puls  X,PC
 * 
 * Entry: U = driver static storage
 *        Y = address of parameter block
+*
+* Exit:  Preserves all registers
+*
+
 DoSel    pshs  x,a,cc
          orcc  #50
          ldx   NPB.FMST,y
@@ -761,6 +782,10 @@ SelTbl   fcb   $0E,$0D,$0B,$07
 * 
 * Entry: U = driver static storage
 *        Y = address of parameter block
+*
+* Exit:  Preserves all registers
+*
+
 NoSel    pshs  x,a,cc
          orcc  #50
          lda   CFGIMG,u

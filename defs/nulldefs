@@ -110,8 +110,6 @@ V.NULLF        EQU       .                   Total Null manager static overhead
 * a non-zero error code in NBP.ERR, or zeros it.
 *
 
-V$NMAGIC       SET       $FFFF
-
                ORG       0
 NPB.DEV        RMB       2                   Device Table Entry Address
 NPB.RGV        RMB       (R$Size-2)          Register / Parameter package (no PC) e.g. NPB.RGV+R$X for X

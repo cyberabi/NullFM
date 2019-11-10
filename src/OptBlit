@@ -1,0 +1,217 @@
+*
+* Work in progress - optimized and unidirectional blitters
+*
+
+
+  ifne  OPTBLIT
+*
+* Various optimized blitters for special cases
+*
+
+*
+* E-rate, MSB-First, two-way, burst
+*
+
+*
+* Simple MSB-first Burst Blitter. <256 bytes
+*
+* Entry: B = byte count (non-zero)
+*        X = transmit buffer
+*        Y = receive buffer
+*        U = hardware pointer
+*
+
+BlitEMX  lda   ,x+
+         sta   <SB.DATA,u  Set up transmit data
+         sta   <SB.GO,u    Start the transfer
+         exg   x,x         Cycles: 8 (fetch of next instruction makes 9)
+         lda   <SB.DATA,u  Get the received data
+         sta   ,y+         Buffer it
+         decb
+          bne  BlitEMX
+         rts
+
+*
+* Simple MSB-first Burst Blitter. Any number of bytes
+*
+* Entry: D = byte count (non-zero)
+*        X = transmit buffer
+*        Y = receive buffer
+*        U = hardware pointer
+*
+
+BlBgEMX  pshs  a
+BlBgEMX1 sta   ,s
+         lda   ,x+
+         sta   <SB.DATA,u  Set up transmit data
+         sta   <SB.GO,u    Start the transfer
+         exg   x,x         Cycles: 8 (fetch of next instruction makes 9)
+         lda   <SB.DATA,u  Get the received data
+         sta   ,y+         Buffer it
+         lda   ,s
+         subd  #1
+          bne  BlBgEMX1
+         puls  a,pc
+
+    ifne DOLSB1ST
+*
+* E-rate, LSB-First, two-way, burst
+*
+
+*
+* Simple LSB-first Burst Blitter. <256 bytes
+*
+* Entry: B = byte count (non-zero)
+*        X = transmit buffer
+*        Y = receive buffer
+*        U = hardware pointer
+*
+
+BlitELX  pshs  y
+BlitELX1 sty   ,s
+         leay  BitRev0,pc
+         lda   ,x+
+         lda   a,y         Reverse bits using table
+         sta   <SB.DATA,u  Set up transmit data
+         sta   <SB.GO,u    Start the transfer
+         exg   x,x         Cycles: 8 (fetch of next instruction makes 9)
+         lda   <SB.DATA,u  Get the received data
+         lda   a,y         Reverse bits using table
+         ldy   ,s          Maintain destination pointer
+         sta   ,y+         Buffer it
+         decb
+          bne  BlitELX1
+         rts
+
+*
+* Simple LSB-first Burst Blitter. Any number of bytes
+*
+* Entry: D = byte count (non-zero)
+*        X = transmit buffer
+*        Y = receive buffer
+*        U = hardware pointer
+*
+
+BlBgELX  pshs  y,a
+BlBgELX1 sta   ,s
+         sty   1,s
+         leay  BitRev0,pc
+         lda   ,x+
+         lda   a,y         Reverse bits using table
+         sta   <SB.DATA,u  Set up transmit data
+         sta   <SB.GO,u    Start the transfer
+         exg   x,x         Cycles: 8 (fetch of next instruction makes 9)
+         lda   <SB.DATA,u  Get the received data
+         lda   a,y         Reverse bits using table
+         ldy   1,s
+         sta   ,y+         Buffer it
+         lda   ,s
+         subd  #1
+          bne  BlBgELX1
+         puls  a,y,pc
+    endc
+
+    ifne DO1WAY    
+*
+* E-rate, MSB-First, one-way, burst
+*
+
+*
+* Simple MSB-first Send-Only Burst Blitter. Any number of bytes
+*
+* Entry: D = byte count (non-zero)
+*        X = transmit buffer
+*        Y = N/A
+*        U = hardware pointer
+*
+
+BlBgEMT  tfr   d,y
+BlBgEMT1 lda   ,x+         Cycles: 6
+         sta   <SB.DATA,u  Set up transmit data
+         sta   <SB.GO,u    Start the transfer
+         bra   BlBgEMT2    Cycles: 3
+BlBgEMT2 leay  -1,y        Cycles: 6
+          bne  BlBgEMT1    Cycles: 3
+         rts
+         
+*
+* Simple MSB-first Receive-Only Burst Blitter. Any number of bytes
+*
+* Entry: D = byte count (non-zero)
+*        X = pointer to constant byte to send (or NULL for 0)
+*        Y = receive buffer
+*        U = hardware pointer
+*
+
+BlBgEMR  pshs  d
+         clra
+         cpx   #0
+          beq  BlBgEMR1
+         lda   ,x          Fetch constant byte to send
+BlBgEMR1 puls  x           Byte count in x, constant byte in a
+
+BlBgEMR2 sta   <SB.DATA,u  Set up constant transmit data
+         sta   <SB.GO,u    Start the transfer
+         exg   x,x         Cycles: 8 (fetch of next instruction makes 9)
+         ldb   <SB.DATA,u
+         stb   ,y+
+         leax  -1,x
+          bne  BlBgEMR2
+         rts
+         
+      ifne DOLSB1ST
+*
+* Simple LSB-first Send-Only Burst Blitter. Any number of bytes
+*
+* Entry: D = byte count (non-zero)
+*        X = transmit buffer
+*        Y = N/A
+*        U = hardware pointer
+*
+
+BlBgELT  pshs  a
+         leay  BitRev0,pc
+BlBgELT1 sta   ,s
+         lda   ,x+
+         lda   a,y         Reverse bits using table
+         sta   <SB.DATA,u  Set up transmit data
+         sta   <SB.GO,u    Start the transfer
+         lda   ,s          Cycles: 4
+         subd  #1          Cycles: 4
+          bne  BlBgELT1    Cycles: 3
+         puls  a,pc
+         
+*
+* Simple LSB-first Receive-Only Burst Blitter. Any number of bytes
+*
+* Entry: D = byte count (non-zero)
+*        X = pointer to constant byte to send (or NULL for 0)
+*        Y = receive buffer
+*        U = hardware pointer
+*
+
+BlBgELR  pshs  d
+         clra
+         cpx   #0
+          beq  BlBgELR1
+         lda   ,x          Fetch constant byte to send
+         leax  BitRev0,pc  Bit-reverse it
+         lda   a,x
+BlBgELR1 ldx   ,s          Byte count in x, constant byte in a
+
+BlBgELR2 sta   <SB.DATA,u  Set up constant transmit data
+         sta   <SB.GO,u    Start the transfer
+         stx   ,s          Cycles: 5
+         leax  BitRev0,pc  Cycles: 5
+         ldb   <SB.DATA,u
+         ldb   b,x         Bit reverse received data
+         stb   ,y+         Buffer it
+         ldx   ,s
+         leax  -1,x
+          bne  BlBgEMR2
+         puls  d,pc
+      endc
+
+    endc
+  endc    
+         
