@@ -105,9 +105,9 @@
 * - Errors: E$DevBsy, E$Param, E$NotRdy
 *
 * Function code SPI.RDTC: Register Data Transfer Configuration
-* - NPB.D = clock rate : clock attributes
+* - NPB.D = clock rate : clock attributes (as if NRC.CLKR:NRC.CLKA)
 * - NPB.X = disable callback (slave mode only)
-* - NPB.Y = transfer attributes : select
+* - NPB.Y = transfer attributes : select (as if NRC.DATR:NRC.SEL)
 * - NPB.U = enable callback (slave mode only)
 * - NPB.PRM0 = enable callback param (slave mode only)
 * - NPB.PRM1 = disable callback param (slave mode only)
@@ -116,9 +116,9 @@
 *
 * Function code SPI.TDT: Transfer Data to and from the Target
 * - NPB.HNDL = handle 
-* - NPB.B = (optional) constant data byte if transmit buffer is null 
-* - NPB.X = transmit buffer (may be null)
-* - NPB.Y = receive buffer (may be null)
+* - NPB.B = (optional) constant data byte if transmit buffer is null  (unimplemented)
+* - NPB.X = transmit buffer (may be null; null is unimplemented)
+* - NPB.Y = receive buffer (may be null; null is unimplemented)
 * - NPB.U = completion callback
 * - NPB.PRM0 = completion callback param 
 * - NPB.PRM1 = buffer size

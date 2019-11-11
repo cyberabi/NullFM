@@ -1,0 +1,660 @@
+********************************************************************
+* W25QXX - Flash Memory RBF Device Driver
+*
+* $Id$
+*
+* Edt/Rev  YYYY/MM/DD  Modified by
+* Comment
+* ------------------------------------------------------------------
+*   0      2019/11/10  Chris Burke
+* Coded as a demo for NullFM; the driver uses NullFM and SPI via nullAPI
+* to access a W25Qxxx SPI flash memory that contains a single disk image.
+* The image is sector-readable but only track-writable.
+* Demo for Level 2 only.
+*
+* Portions based DC3_drvr_src example (C) Microware Systems Corporation.
+*
+
+         nam   W25QXX
+         ttl   W25QXX Flash Memory RBF Device Driver
+
+         ifp1  
+         use   defsfile
+         use   rbf.d
+         use   nulldefs
+         use   spidefs
+         use   flashdefs
+         endc  
+
+DriveCnt set   1            For this demo support only one drive
+
+******************************
+*
+* W25Q128 SPI Commands
+*
+* This device operates in SPI Mode 0 or 3, burst mode, MSB-first
+* https://www.winbond.com/resource-files/w25q128jv%20revf%2003272018%20plus.pdf
+*
+* The device is organized into 65,536 programmable pages of 256-bytes each.
+* Up to 256 bytes can be programmed at a time. Pages can be erased in groups 
+* of 16 (4KB  sector  erase).
+*
+* The erased state is $FF, and once programmed a byte can't be reprogrammed
+* (other than by clearing additional bits) unless first erased.
+*
+
+F.PGPGM  equ   $02          (A A A D...) Page program / write (a sector is 4K; a page is 256 bytes)
+F.WRDS   equ   $04          Write disable
+F.RSTS1  equ   $05          (d) Read status register 1 (7-0)
+F.WREN   equ   $06          Write enable
+F.READF  equ   $0B          (A A A 0 d...) Fast read
+F.RSTS3  equ   $15          (d) Read status register 3 (23-16)
+F.ERSCT  equ   $20          (A A A) Sector erase (a sector is 4K: a page is 256 bytes)
+F.RSTS2  equ   $35          (d) Read status register 2 (15-8)
+F.ERCHP  equ   $60          Erase entire chip
+F.ENRST  equ   $66          Enable soft reset
+F.EXRST  equ   $99          Execute soft reset
+F.ERCH2  equ   $C7          Erase entire chip (secondary)
+
+S1.WEL   equ   %00000010    Indicates write enabled
+S1.BSY   equ   %00000001    Indicates a write in progress
+
+S3.DRV   equ   %01100000    Hardware driver strength of output (defaults to 3)
+
+
+******************************
+*
+* Static Storage
+*
+*
+         org   Drvbeg
+         rmb   Drvmem*DriveCnt
+
+CURTBL   rmb   2            Ptr to current drive tbl
+CURDRV   rmb   1            Drive select bit pattern
+V.TMP    rmb   1            Temporary save byte
+V.BUF    rmb   2            Local buffer addr
+V.FREZ   rmb   1            Freeze dd. info (for one read0)
+
+V.SPI    rmb   2            Device table entry for SPIBUS
+V.HNDL   rmb   1            SPI device handle (only need one in this demo)
+V.PBLK   rmb   NPB.SIZ      SPI parameter block (only need one in this demo)
+size     equ   .            Total static requirement
+
+
+******************************
+*
+* Module header
+*
+
+tylg     set   Drivr+Objct   
+atrv     set   ReEnt+rev
+rev      set   $00
+edition  set   0
+
+         mod   eom,name,tylg,atrv,start,size
+         
+name     fcs   "W25QXX"
+         fcb   edition
+         
+busname  fcs   "SPIBUS"         
+         
+******************************
+*
+* Branch Table
+*
+start    lbra  Init
+         lbra  Read
+         lbra  Write
+         lbra  GetStat
+         lbra  SetStat
+         lbra  Term
+
+
+         pag
+******************************
+*
+* Put Status Call
+*
+
+SetStat  ldx   PD.RGS,y     Point to parameters
+         ldb   R$B,x        Get stat call
+         cmpb  #SS.Reset    Restore call?
+          beq  RESTOR       ..yes; do it (dummy operation)
+         cmpb  #SS.WTrk     Write track call?
+          lbeq WRTTRK       ..yes; do it.
+         cmpb  #SS.FRZ      Freeze dd. info?
+          beq  SETFRZ       Yes; ....flag it.
+          
+* We don't support any GetStt calls
+GetStat  comb               ...NO; Error
+         ldb   #E$UnkSvc    Error code
+         rts
+
+* Freeze dd. info
+SETFRZ   ldb   #$FF
+         stb   V.FREZ,u     Set flag
+RESTOR   equ   *
+         clrb
+         rts
+
+
+         pag
+******************************
+*
+* Initialize The I/O Port
+*
+* The flash memory is on the SPI bus. To access it we link to
+* the spi bus (SPIBUS device) via an I$Attach call, and then register
+* a configuration that tells the SPI bus our slave select, the
+* kind of clocking we need, etc.
+*
+* Entry: (U) = Pointer To Global Storage
+*
+* Exit:  (A) Modified
+*        (X) Modified
+*        (Y) Unchanged
+*        (U) Unchanged
+*
+
+Init     lda   #$FF
+         ldb   #DriveCnt
+         stb   V.NDRV,u     Inz number of drives
+         leax  DRVBEG,u     Point to first drive table
+INILUP   sta   DD.TOT+2,x   Inz total number of sectors to non-zero (dummy)
+         sta   V.TRAK,x     Inz current track to high track count (dummy)
+         leax  DRVMEM,x     Point to next drive table
+         decb
+          bne  INILUP
+          
+         ldd   #256+6       We need a sector buffer + room for the largest SPI command
+         pshs  u
+         OS9   F$SRqMem
+         tfr   u,x
+         puls  U
+          bcs  RETRN1       Error out if no mem available
+         stx   V.BUF,u      Save base address for future use
+
+         pshs  u
+         leax  busname,pc   We need to attach to the SPI bus
+         lda   #UPDAT.
+         OS9   I$Attach
+         tfr   u,x
+         puls  U
+          bcs  RETRN1       Error out if no SPI bus available
+         stx   V.SPI,u      Save device table entry for future use
+         
+         pshs  y
+         
+         leay  V.PBLK,u     We need to declare a suitable SPI configuration; parameter block
+         ldd   #(CKR.0US*256+CKA.MD0+CKA.BRST) No delays, mode 0, burst mode
+         lbsr  NFInitPB     Call API function to set up parameter block
+         lda   #UPDAT.+ATR.MSB
+         ldb   V.PORT+1,u   Get our slave select from the dummy address
+         andb  #3
+         orb   #CKA.BRST    Burst mode
+         std   NPB.Y,y
+         
+         ldb   #SPI.RDTC    Register the configuration
+         stb   NPB.FUNC,y
+         lbsr  NFDirect     Call API function to register configuration
+         lda   NPB.HNDL,y
+         puls  y
+          bcs  RETRN1
+         sta   V.HNDL,u     Save "handle" for our SPI configuration
+         clrb
+RETRN1   rts
+
+
+         pag
+******************************
+*
+* Write Sector Command
+*
+* For this device, we don't allow sector writes although
+* technically we can write a sector exactly once after
+* it is erased. To write this device use track writes.
+*
+* Entry: (B) = Msb Of Logical Sector Number
+*        (X) = Lsb's Of Logical Sector Number
+*        (Y) = Ptr To Path Descriptor
+*        (U) = Ptr To Global Storage
+*
+* Error:
+*   Carry Set
+*   B = Error Code
+*
+
+Write    comb
+         ldb   #E$WP        Error: write protected
+         rts
+
+
+******************************
+*
+* Write Full Track
+*
+* For this device, we always allocate 32 pages (two sectors, 8K)
+* to a track regardless of how much the device actually uses.
+* Note that this will fail if a device descriptor declares more
+* than 32 spt (which we could check at the Init call but don't).
+* The caller need provide only as much data as the device
+* descriptor declares (e.g. 18*256 bytes as with a typical floppy).
+*
+* Entry: (A) = Track
+*        (X) = PD.RGS
+*        (Y) = Path Descriptor
+*        (U) = Global Storage
+*
+
+WRTTRK   bsr   SELECT       Select drive
+          bcs  WRERR9
+
+         lda   R$U+1,x      Track number
+         ldb   R$Y+1,x      Side/density info
+         ldx   Curtbl,u     Point to drive table
+         stb   DD.Fmt,x     Update media format byte
+         
+* To write a full track, we first erase it. This requires two SPI
+* commands, one to erase each 4K sector of the track.
+256
+WRTRK2 lbsr SEEKTR Seek to track
+ ldb #F.WRTR
+ ldx PD.RGS,y
+ ldx R$X,x Get buffer addr
+ clr V.Eflg,u
+ bra WRITS1
+ 
+*
+* Convert a logical track number in A, to a flash address in A:X.
+* A physical track is always 32 pages for this driver (some can be unused)
+* Result is therefore logical track * 32 * 256
+*
+TRK2ADR  clr   ,-s
+         ldb   #32
+         mul
+         pshs  d
+         puls  a,x,pc
+
+*
+* Convert an LSN in B:X and sectors-per-track in A to a physical track number
+* in X and a physical page within the track in B.
+* A physical track is always 32 pages for this driver (some can be unused);
+* the sectors-per-track will be in the range 1..32.
+*
+* For this demo we just use an ugly subtraction loop
+*
+LSN2TRK  clr   ,-s
+         clr   ,-s
+         clr   ,-s
+         pshs  b,x
+         clrb
+         exg   a,b
+         pshs  d
+         pshs  a           Now have 24-bit divisor at 0,s; 24-bit dividend at 3,s; 24-bit quotient at 6,s
+         
+DIVLP    ldd   3+1,s
+         subd  0+1,s
+         std   3+1,s
+         lda   3+0,s
+         sbca  #0
+          bcc  DIVOK
+          
+* This subtraction failed; correct remainder and exit
+         ldb   3+1+1,s
+         addd  0+1,s        Correct remainder is in D (B actually); correct track is at 6+1,s
+         leas  6+1,s
+         puls  x,pc
+
+* Subtraction succeeded; increment quotient
+DIVOK    sta   3+0,s
+         ldd   6+1,s
+         addd  #1
+         std   6+1,s
+         lda   6+0,s
+         adca  #0
+         sta   6+0,s
+         bra   DIVLP
+         
+         
+ pag
+*************************************************************
+*
+* Read Sector Command
+*
+* Input: B = Msb Of Logical Sector Number
+*        X = Lsb'S Of Logical Sector Number
+*        Y = Ptr To Path Descriptor
+*        U = Ptr To Global Storage
+*
+* Output: 256 Bytes Of Data Returned In Buffer
+*
+* Error: Cc=Set, B=Error Code
+*
+READSK lda #$91 Error retry code
+ cmpx #0 Is this sector zero?
+ bne RDDSK3 Branch if not
+ lbra READ0 Do read of sector zero
+
+
+RDDSK1 bcc RDDSK3 Retry without restore
+ pshs d,x
+ lbsr RESTOR Drive to tr00
+ puls d,x
+RDDSK3 pshs d,x
+ bsr READSC Read sector
+ puls d,x
+ bcc WRERR9 Return if no error
+ lsra DONE?
+ bne RDDSK1 ...no; retry.
+*
+* Fall Through To Try One Last Time
+*
+READSC bsr SEEK Move head to track
+ bcs WRERR9
+ ldx PD.BUF,y Point to buffer
+ pshs CC Save irq mask info
+ orcc #IRQMask+FIRQMask Disable interrupts
+ ldb #F.READ Read sector command
+ lbsr WCR Issue command
+ pshs Y,u Save regs
+ ldy V.CMDR,u
+ ldu V.DATR,u
+ bra READS3
+ pag
+************************************************************
+*
+* Read Loop
+*
+READS2 lda ,u Get data
+ sta ,x+ Store it
+READS3 ldb ,y Get status
+ bitb #%00000010 Data req?
+ bne READS2 ..yes; honor it.
+ bitb #%00000001 Done?
+ bne READS3 ...no; try again.
+
+
+ puls Y,u Restore regs
+ puls CC Restore irq mask info
+ bitb #%00000100 Lost data?
+ bne RDERR ..yes; return it.
+ lbra STCK
+
+
+
+RDERR comb
+ ldb #E$Read
+ rts
+ 
+
+         pag
+******************************
+*
+* Select Drive
+*
+* Entry: (U)= Pointer To Global Storage
+*
+* Exit:  Curtbl,u=Current Drive Tbl
+*        Curdrv,u=Drive Number
+*
+SELECT   lda   PD.DRV,y     Get drive number
+         cmpa  V.NDRV,u     Drive num ok?
+          bhs  ERUNIT
+          
+         pshs  b,x
+         sta   CURDRV,u
+         leax  DRVBEG,u     Table beginning
+         ldb   #DRVMEM
+         mul                OFFSET For this drive
+         leax  d,x
+         stx   CURTBL,u     Current table ptr
+         puls  b,x,pc
+
+
+ERUNIT   comb
+         ldb   #E$UNIT      Error: illegal unit (drive)
+         rts
+         
+         
+***************************************************************
+*
+* Seek A Track
+*
+* Input:
+*   B = Msb Of Logical Sector Number
+*   X = Lsb'S Of Logical Sector Number
+*
+* Output:
+*   X = Physical Sector Number
+*   A,B = Undefined
+*
+* Error:
+*   Carry Set
+*   B = Error Code
+*
+SEEK bsr SELECT Select drive
+ bcs RETRN2 Drive out of range?
+ bsr PHYSIC Convert to physical sect + track
+ bcs RETRN2 Sector out of range?
+SEEKTR bra SETTRK Set up for track change
+ pag
+**************************************************************
+*
+* Convert Logical Sector Number
+* To Physical Track And Sector
+*
+*  Input:  B = Msb Of Logical Sector Number
+*          X = Lsb'S Of Logical Sector Number
+*  Output: A = Physical Track Number
+*          Sector Reg = Physical Sector Number
+*  Error:  Carry Set & B = Error Code
+*
+PHYSIC tstb CHECK Sector bounds
+ bne PHYERR  msb must be zero
+ tfr X,D Logical sector (os-9)
+ cmpd #0 Logical sector zero?
+ beq PHYSC7 ..yes; skip conversion.
+ ldx CURTBL,u
+ cmpd DD.TOT+1,x Too high sector number?
+ bhs PHYERR ..yes; sorry
+ stb V.TMP,u Save (b)
+ clrb
+ pshs B Will be track number
+ ldb DD.FMT,x
+ lsrb SHIFT Side bit to carry
+ ldb V.TMP,u Restore (b)
+ bcs PHYSC4 Bra if double sided
+ dec 0,S
+PHYSC2 inc 0,S
+ subb DD.TKS,x Subtract one track worth of sectors
+ sbca #0
+ bcc PHYSC2 Repeat until less than 1 track size
+ bra PHYSC5
+PHYSC3 com V.SIDE,u Switch sides
+ bne PHYSC4 Skip track inc if side 1
+ inc 0,S
+PHYSC4 subb DD.TKS,x
+ sbca #0
+ bcc PHYSC3 Repeat until less than 1 trk
+PHYSC5 addb DD.TKS,x Add back for sector number
+ puls A Desired track.
+PHYSC7 stb [V.SECR,u] Put sector (b) in sector reg
+ clrb
+RETRN2 rts
+
+
+PHYERR comb
+ ldb #E$SECT Error: bad sector number
+ rts
+ 
+ pag
+***********************************************************
+*
+* Check Status For Error Conditions
+*
+*  Input: (B)= Status Of Fd1771
+*
+*  If Error: (B)= Error Code & Carry Is Set
+*
+*  If No Error: Carry Is Clear
+*
+STCK bitb #%10000000 Drive ready?
+ bne ERNRDY ..no; error
+ bitb #%00010000 Seek error?
+ bne ERSEEK ..yes; return error
+ bitb #%00001000 Check sum ok?
+ bne ERRCRC ..no; return error
+ clrb
+ rts
+
+
+
+ERNRDY comb
+ ldb #E$NotRdy Error: drive not ready
+ rts
+
+ERSEEK comb
+ ldb #E$SEEK Error: seek error
+ rts
+
+ERRCRC comb
+ ldb #E$CRC Error: bad check sum
+ rts
+ pag
+****************************************************************
+*
+* Read Logical Sector Zero
+*
+*
+*
+READ0 lbsr RDDSK3 Read sector
+ bcs DELAY4
+ ldx PD.BUF,y
+ pshs X,y
+ tst V.Frez,u Skip copy of dd. info?
+ bne Read05 Yes; ....make quick exit
+ ldy CURTBL,u
+ ldb #DD.SIZ-1
+READ01 lda b,x
+ sta B,y
+ decb
+ bpl READ01
+ lda DD.FMT,y
+ ldy 2,S Restore (y)
+ ldb Pd.Dns,y Get drive capabilities
+ bita #%00000010 Media dden?
+ bne TYPERR ..yes; report error.
+ bitb #%00000001 Drive dden?
+ bne Typerr Yes; ....no can do.
+ bita #%00000100 Media dbl track dens?
+ beq Read03 No; ....all's well
+ bitb #%00000010 Drive dbl track dens?
+ beq Typerr No; .....incompatible media
+Read03 bita #%00000001 Dbl sided?
+ beq READ05 ...no; we can handle it.
+ lda PD.SID,y
+ suba #2
+ bcs TYPERR
+READ05 clrb
+ puls X,y,pc
+
+
+TYPERR comb
+ ldb #E$BTYP
+ puls X,y,pc
+ pag
+****************************************************************
+*
+*
+* Write Command Register
+*
+*
+*   1 - Will Add Step Rate To Seek Commands When Wcr0 Called
+*   2 - Issues Command To Controller Chip
+*   3 - Will Wait For Status "Not Busy" If Wcr0 Called
+*
+*
+WCR0 eorb PD.STP,y Add step rate to command
+
+ bsr WCR Issue command & delay
+WCR02 ldb [V.CMDR,u] Get status
+ bitb #%00000001 Busy?
+ bne WCR02 ..yes; wait for it.
+ rts
+
+
+
+WCR lda CURDRV,u
+ sta [V.SEL,u] Select drive
+ orb V.EFLG,u
+ clr V.EFLG,u
+ stb [V.CMDR,u] Issue command
+
+
+DELAY bsr DELAY1
+DELAY1 bsr DELAY2
+DELAY2 bsr DELAY4
+DELAY4 nop
+ rts
+ pag
+*********************************************
+*
+* Write Verify Routine
+*
+*
+*    Reads back the sector just written
+*    Returns carry set if bad sector
+*    Compares 'read' data to 'write' data
+*    Returns carry set if no compare
+*  Note: Only 2 bytes out of every 8 is compared
+*        assuming that any other error will cause
+*        a bad Crc.
+
+WRTVFY pshs d,x
+ ldx PD.BUF,y Save present buffer addr
+ pshs X On stack
+ ldx V.BUF,u Point to local buffer
+ stx PD.BUF,y
+ ldx 4,S Restore (x)
+ lbsr READSK
+ puls X
+ stx PD.BUF,y Restore buffer pointer
+ bcs WRTVF6 Error; ...try again
+ lda #32 Test 32 places in buffer
+ pshs a,y,u
+ ldy V.BUF,u Point "y" to local buffer
+ tfr x,u
+WRTCHK ldx 0,u Get two bytes
+ cmpx 0,y Check with 'read data'
+ bne WRTVF2 Error; ...return carry set
+ leau 8,u
+ leay 8,y Bump both pointers
+ dec 0,s Done yet?
+ bne WRTCHK No; ....keep checking
+ bra WRTVF4
+WRTVF2 orcc #%00000001 Set carry
+WRTVF4 puls a,y,u
+WRTVF6 puls d,x,pc
+ pag
+**************************************
+*
+* Terminate use of the disk
+*
+*
+*    Return Local memory to the system
+*
+*
+
+TERMNT ldu V.BUF,u Point to memory for return
+ ldd #256
+ OS9 F$SRtMem Return local buffer to free mem
+ clrb
+ rts
+
+
+ emod
+
+eom equ *
+
+ end

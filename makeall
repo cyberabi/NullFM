@@ -16,4 +16,6 @@
 ./asm.sh src/spibus.slot3
 ./asm.sh src/spibus.disto.l1
 ./asm.sh src/spibus.slot3.l1
+./asm.sh src/flash0_35s
+./asm.sh src/w25qxx
 

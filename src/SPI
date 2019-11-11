@@ -120,6 +120,7 @@ SB.GO    rmb   1            Write anything to this address to start the transfer
 SBC.ISEL equ   %00001111    Active low slave selects (0..3)
 SBC.IMOD equ   %00110000    Active low SPI mode (e.g. 00 = mode 3)
 
+
 ******************************
 *
 * Module header
@@ -134,6 +135,7 @@ edition  set   0
 
 name     fcs   /SPI/
          fcb   edition
+
 
 ******************************
 *
@@ -155,6 +157,7 @@ start    lbra  Init
 ******************************
 *
 * Initialize the device
+*
 * Typically called as a result of I$Attach
 * IOMan takes care of us being called only once if multiple I$Attach calls
 *
