@@ -9,7 +9,6 @@
 *   0      2019/11/10  Chris Burke
 * Coded as a demo for NullFM; the driver uses NullFM and SPI via nullAPI
 * to access a W25Qxxx SPI flash memory that contains a single disk image.
-* The image is sector-readable but only track-writable.
 * Demo for Level 2 only.
 *
 * Portions based DC3_drvr_src example (C) Microware Systems Corporation.
@@ -27,6 +26,7 @@
          endc  
 
 DriveCnt set   1            For this demo support only one drive
+SPIXMem  set   256+6        Sector buffer + room for the largest SPI command
 
 ******************************
 *
@@ -41,6 +41,11 @@ DriveCnt set   1            For this demo support only one drive
 *
 * The erased state is $FF, and once programmed a byte can't be reprogrammed
 * (other than by clearing additional bits) unless first erased.
+*
+* To create a read / write device from this, we treat each 4K "sector" of flash
+* as a physical sector of the drive, and use only the first 256 byte page.
+* This lets us hanle up to 4096 sectors (1MB of floppy capacity). It's very
+* wasteful but gives us a straightforward demo of the SPI bus controlling flash.
 *
 
 F.PGPGM  equ   $02          (A A A D...) Page program / write (a sector is 4K; a page is 256 bytes)
@@ -114,7 +119,7 @@ start    lbra  Init
          pag
 ******************************
 *
-* Put Status Call
+* Put Status call
 *
 
 SetStat  ldx   PD.RGS,y     Point to parameters
@@ -126,14 +131,16 @@ SetStat  ldx   PD.RGS,y     Point to parameters
          cmpb  #SS.FRZ      Freeze dd. info?
           beq  SETFRZ       Yes; ....flag it.
           
+* Get Status call
 * We don't support any GetStt calls
 GetStat  comb               ...NO; Error
          ldb   #E$UnkSvc    Error code
          rts
 
-* Freeze dd. info
+* Freeze dd. info (SS.Frz)
 SETFRZ   ldb   #$FF
          stb   V.FREZ,u     Set flag
+         
 RESTOR   equ   *
          clrb
          rts
@@ -142,7 +149,7 @@ RESTOR   equ   *
          pag
 ******************************
 *
-* Initialize The I/O Port
+* Initialize the I/O port
 *
 * The flash memory is on the SPI bus. To access it we link to
 * the spi bus (SPIBUS device) via an I$Attach call, and then register
@@ -162,13 +169,14 @@ Init     lda   #$FF
          ldb   #DriveCnt
          stb   V.NDRV,u     Inz number of drives
          leax  DRVBEG,u     Point to first drive table
+         
 INILUP   sta   DD.TOT+2,x   Inz total number of sectors to non-zero (dummy)
          sta   V.TRAK,x     Inz current track to high track count (dummy)
          leax  DRVMEM,x     Point to next drive table
          decb
           bne  INILUP
           
-         ldd   #256+6       We need a sector buffer + room for the largest SPI command
+         ldd   #SPIXMem     We need a sector buffer + room for the largest SPI command
          pshs  u
          OS9   F$SRqMem
          tfr   u,x
@@ -203,27 +211,20 @@ INILUP   sta   DD.TOT+2,x   Inz total number of sectors to non-zero (dummy)
          puls  y
           bcs  RETRN1
          sta   V.HNDL,u     Save "handle" for our SPI configuration
+         
          clrb
+         
 RETRN1   rts
 
 
          pag
 ******************************
 *
-* Write Sector Command
+* Write Sector command
 *
-* This is a flash device, and we can only "clear" bits
-* in it during a write. A format "sets" all bits in a
-* given track.
-*
-* The main way to enforce this is to pre-read the sector
-* to make sure it is all $FF; if not, return a write error.
-* This makes writes expensive but they are meant to happen
-* only once (e.g. when backup up another disk here)
-*
-* Because we allocate two full flash "sectors" per track
-* regardless of actual track size, we have to translate
-* the provided LSN to get a correct flash address.
+* Physical sectors are 4096 bytes; we use only the first 256.
+* Since flash isn't rewritable without erasing, we erase the
+* whole physical sector before each write.
 *
 * Entry: B = Msb Of Logical Sector Number
 *        X = Lsb's Of Logical Sector Number
@@ -232,34 +233,54 @@ RETRN1   rts
 *
 *        PD.BUF,Y = Sector buffer
 *
+* Exit:  256 Bytes Of Data Written From Buffer
+*
 * Error:
 *   Carry Set
 *   B = Error Code
 *
 
-Write    bsr   SELECT       Select drive
+Write    pshs  y,x,a
+         bsr   SELECT       Select drive
           bcs  WRERR9
-          
-* FIXME: Translate the LSN
-* FIXME: Pre-read the sector and check for $FF
-* FIXME: Write the sector from caller's buffer
 
-         comb
-         ldb   #E$WP        Error: write protected
-WRERR9   rts
+* Flash location = LSN * 16 * 256
+         tstb               Must be zero
+          bne  LSNErr       or LSN is out of range
 
+* Write-enable the flash
+         ldb   #F.WREN      Write-enable the device
+         bsr   CMD1B        (execute one-byte command)
+          bcs  WRERR9
+         
+* Erase this "sector"
+         clrb
+         bsr   LSN2Addr     Convert LSN in B:X to flash address in A:X
+         pshs  x,a
+         ldb   #F.ERSCT     Erase Sector command
+         bsr   CMD4B        (execute four-byte command)
+         puls  a,x
+          bcs  WRERR9
+         
+* Write the first page of the sector
+         ldy   PD.BUF,y     Caller's buffer
+         bsr   CMDWRT       Write one page from buffer in Y to flash address in A:X
+         
+WRERR9   puls  a,x,y,pc
 
+LSNERR   comb
+         ldb   #E$Sect      Error: bad sector number
+         puls  a,x,y,pc
+         
+         
 ******************************
 *
 * Write Full Track (SS.WTrk)
 *
-* For this device, we always allocate 32 pages (two sectors, 8K)
-* to a track regardless of how much the device actually uses.
+* We treat this like a hard disk: if the track is zero, we erase
+* the whole device; otherwise we ignore the call.
 *
-* Note that this will fail if a device descriptor declares more
-* than 32 spt (which we could check at the Init call but don't).
-*
-* The caller's track buffer is ignored; we just erase the "track".
+* The caller's track buffer is ignored.
 *
 * Entry: X = PD.RGS
 *        Y = Path Descriptor
@@ -270,95 +291,34 @@ WRERR9   rts
 *
 
 WRTTRK   bsr   SELECT       Select drive
-          bcs  WRERR9
+          bcs  WRTTRK9
 
          lda   R$U+1,x      Track number
-         ldb   R$Y+1,x      Side/density info
-         ldx   Curtbl,u     Point to drive table
-         stb   DD.Fmt,x     Update media format byte
-         
+          bne  WRTTRK9
+         lda   R$Y+1,x      Side number
+         bita  #1
+          bne  WRTTRK9
+          
+* Track 0, Side 0
 * Write-enable the flash
-         asla
-         pshs  a            (two flash "sectors" per logical track)
          ldb   #F.WREN      Write-enable the device
          bsr   CMD1B        (execute one-byte command)
-          bcs  WRERR9
+          bcs  WRTTRK9
          
-* Erase this part of the flash first
+* Erase whole flash
          bsr   SCT2ADR      Get starting address of 1st flash sector in this track
-         ldb   #F.ERSCT     Erase Sector command
-         bsr   CMD4B
-         puls  a
-          bcs  WRERR9
-          
-         inca
-         bsr   SCT2ADR      Get starting address of 2nd flash sector in this track
-         ldb   #F.ERSCT     Erase Sector command
-         bsr   CMD4B
-          bcs  WRERR9
+         ldb   #F.ERCHP     Erase chip command
+         bsr   CMD1B        (execute one-byte command)
          
-         rts
+WRTTRK9  rts
          
          
-*
-* Convert a flash sector number in A, to a flash address in A:X.
-* A flash sector is 16 pages, a page is 256 bytes
-*
-SCT2ADR  clr   ,-s
-         ldb   #16
-         mul
-         pshs  d
-         puls  a,x,pc
-
-*
-* Convert an LSN in B:X and sectors-per-track in A to a physical track number
-* in X and a physical page within the track in B.
-* A physical track is always 32 pages for this driver (some can be unused);
-* the sectors-per-track will be in the range 1..32.
-*
-* For this demo we just use an ugly subtraction loop to divide
-*
-LSN2TRK  clr   ,-s
-         clr   ,-s
-         clr   ,-s
-         pshs  b,x
-         clrb
-         exg   a,b
-         pshs  d
-         pshs  a           Now have 24-bit divisor at 0,s; 24-bit dividend at 3,s; 24-bit quotient at 6,s
-         
-DIVLP    ldd   3+1,s
-         subd  0+1,s
-         std   3+1,s
-         lda   3+0,s
-         sbca  #0
-          bcc  DIVOK
-          
-* This subtraction failed; correct remainder and exit
-         ldb   3+1+1,s
-         addd  0+1,s        Correct remainder (sector) is in D (B actually); correct track is at 6+1,s
-         leas  6+1,s
-         puls  x,pc
-
-* Subtraction succeeded; increment quotient
-DIVOK    sta   3+0,s
-         ldd   6+1,s
-         addd  #1
-         std   6+1,s
-         lda   6+0,s
-         adca  #0
-         sta   6+0,s
-         bra   DIVLP
-         
-         
- pag
+         pag
 ******************************
 *
-* Read Sector Command
+* Read Sector command
 *
-* Because we allocate two full flash "sectors" per track
-* regardless of actual track size, we have to translate
-* the provided LSN to get a correct flash address.
+* Physical sectors are 4096 bytes; we use only the first 256.
 *
 * Entry: B = Msb Of Logical Sector Number
 *        X = Lsb's Of Logical Sector Number
@@ -373,21 +333,28 @@ DIVOK    sta   3+0,s
 *   Carry Set
 *   B = Error Code
 *
-*
-*
-* Error: Cc=Set, B=Error Code
-*
-Read     bsr   SELECT       Select drive
+
+Read     pshs  y,x,a
+         bsr   SELECT       Select drive
           bcs  RDERR9
           
-* FIXME: Translate the LSN
-* FIXME: Read the sector
+* Flash location = LSN * 16 * 256
+         tstb               Must be zero
+          bne  LSNErr       or LSN is out of range
 
-         comb
-         ldb   #E$WP        Error: write protected
-RDERR9   rts
+         cmpx  #0           Special case for LSN0 read
+          bne  ReadFrz
+         tst   V.Frez,u     Not special if DD info is frozen
+          beq  ReadLSN0
+          
+* Read the first page of the sector
+ReadFrz  bsr   LSN2Addr     Convert LSN in B:X to flash address in A:X
+         ldy   PD.BUF,y     Caller's buffer
+         bsr   CMDRDD       Read one page into buffer in Y from flash address in A:X
+         
+RDERR9   puls  a,x,y,pc
  
-
+          
          pag
 ******************************
 *
@@ -398,6 +365,7 @@ RDERR9   rts
 *
 * Exit:  Curtbl,u=Current Drive Tbl
 *        Curdrv,u=Drive Number
+*        V.SIDE,u=0
 *
 SELECT   lda   PD.DRV,y     Get drive number
          cmpa  V.NDRV,u     Drive num ok?
@@ -415,141 +383,148 @@ SELECT   lda   PD.DRV,y     Get drive number
 
 
 ERUNIT   comb
-         ldb   #E$UNIT      Error: illegal unit (drive)
+         ldb   #E$Unit      Error: illegal unit (drive)
          rts
          
          
  pag
-**************************************************************
+******************************
 *
-* Convert Logical Sector Number
-* To Physical Track And Sector
+* Convert Logical Sector Number to physical flash address
+* Each physical sector is 4096 bytes, so we need to multiply
+* the input LSN by 16 * 256
 *
-*  Input:  B = Msb Of Logical Sector Number
-*          X = Lsb'S Of Logical Sector Number
-*          U = Global storage
+* Entry:  B = Msb Of Logical Sector Number (0)
+*         X = Lsb's Of Logical Sector Number
+*         U = Global storage
 *
-*          V.SIDE,U = 0 (cleared by SELECT)
+* Exit:   A = Msb of physical flash address
+*         X = Lsb's  of physical flash address
+*         U = Unchanged
+*         Y = Unchanged
 *
-*  Output: A = Physical Track Number
-*          Sector Reg = Physical Sector Number
-*  Error:  Carry Set & B = Error Code
+* Error:
+*   Carry Set
+*   B = Error Code
 *
-PHYSIC   tstb               CHECK Sector bounds
+LSN2Addr tstb               CHECK Sector bounds
           bne  PHYERR       msb must be zero
           
          tfr   x,d          Logical sector (os-9)
          cmpd  #0           Logical sector zero?
-          beq  PHYSC7       ..yes; skip conversion.
+          beq  PHYSC7       ..yes; skip conversion (A:X correct)
+         
+         bita  #$F0         LSN must be $000..$FFF
+          bne  PHYERR
           
          ldx   CURTBL,u
          cmpd  DD.TOT+1,x   Too high sector number?
           bhs  PHYERR       ..yes; sorry
           
-         stb   V.TMP,u      Save (b)
-         clrb
-         pshs  b            Will be track number
-         ldb   DD.FMT,x
-         lsrb               SHIFT Side bit to carry
-         ldb   V.TMP,u      Restore (b)
-          bcs  PHYSC4       Bra if double sided
-          
-* Compute track (single-sided)
-         dec   0,s          (single-sided starts at -1)
-PHYSC2   inc   0,s
-         subb  DD.TKS,x     Subtract one track worth of sectors
-         sbca  #0
-          bcc  PHYSC2       Repeat until less than 1 track size
-         bra   PHYSC5
-         
-* Compute track (double-sided) (enter at PHYSC4)
-* Even-numbered tracks are on side 0, odd-numbered tracks
-* are on side 1
-PHYSC3   com   V.SIDE,u     Switch sides
-          bne  PHYSC4       Skip track inc if side 1
-          
-         inc   0,s
-         
-PHYSC4   subb  DD.TKS,x
-         sbca  #0
-          bcc  PHYSC3       Repeat until less than 1 trk
-          
-PHYSC5   addb  DD.TKS,x     Add back for sector number
-         puls  a            Desired track.
-         
-PHYSC7   stb   [V.SECR,u]   Put sector (b) in sector reg
-         clrb
-RETRN2   rts
+         clr   ,-s          x 256
+         aslb
+         rola
+         aslb
+         rola
+         aslb
+         rola
+         aslb
+         rola               x 16
+         pshs  d
+         puls  a,x
 
+         clrb               Success
+         rts
 
+* The LSN is out of range
 PHYERR   comb
-         ldb   #E$SECT      Error: bad sector number
+         ldb   #E$Sect      Error: bad sector number
          rts
 
  
- pag
-****************************************************************
+         pag
+******************************
 *
 * Read Logical Sector Zero
 *
+* Entry: B = Msb Of Logical Sector Number (0)
+*        X = Lsb's Of Logical Sector Number (0)
+*        Y = Path Descriptor
+*        U = Global Storage
 *
+*        PD.BUF,Y = Sector buffer
+*        Caller's y,x,a on stack
 *
-READ0 lbsr RDDSK3 Read sector
- bcs DELAY4
- ldx PD.BUF,y
- pshs X,y
- tst V.Frez,u Skip copy of dd. info?
- bne Read05 Yes; ....make quick exit
- ldy CURTBL,u
- ldb #DD.SIZ-1
-READ01 lda b,x
- sta B,y
- decb
- bpl READ01
- lda DD.FMT,y
- ldy 2,S Restore (y)
- ldb Pd.Dns,y Get drive capabilities
- bita #%00000010 Media dden?
- bne TYPERR ..yes; report error.
- bitb #%00000001 Drive dden?
- bne Typerr Yes; ....no can do.
- bita #%00000100 Media dbl track dens?
- beq Read03 No; ....all's well
- bitb #%00000010 Drive dbl track dens?
- beq Typerr No; .....incompatible media
-Read03 bita #%00000001 Dbl sided?
- beq READ05 ...no; we can handle it.
- lda PD.SID,y
- suba #2
- bcs TYPERR
-READ05 clrb
- puls X,y,pc
+* Exit:  256 Bytes Of Data Returned In Buffer
+*
+* Error:
+*   Carry Set
+*   B = Error Code
+*
 
+ReadLSN0 bsr   LSN2Addr     Convert LSN in B:X to flash address in A:X
+         ldy   PD.BUF,y     Caller's buffer
+         bsr   CMDRDD       Read one page into buffer in Y from flash address in A:X
+         
+         ldx   PD.BUF,y
+         ldy   CURTBL,u
+         ldb   #DD.SIZ-1
+READ01   lda   b,x
+         sta   b,y
+         decb
+          bpl  READ01
 
-TYPERR comb
- ldb #E$BTYP
- puls X,y,pc
+         clrb
+         puls  a,x,y,pc
+
  
- 
- pag
-**************************************
+         pag
+******************************
 *
 * Terminate use of the disk
 *
+* Entry: U = Global Storage
 *
-*    Return Local memory to the system
+* Exit:
+*   Deregister our SPI config
+*   Detach from the SPI driver
+*   Return Local memory to the system
+*
+* Error:
+*   Carry Set
+*   B = Error Code
 *
 *
 
-TERMNT ldu V.BUF,u Point to memory for return
- ldd #256
- OS9 F$SRtMem Return local buffer to free mem
- clrb
- rts
+Term     equ   *
+
+* Deregister our SPI config
+         pshs  y
+         leay  V.PBLK,u     Return our SPI configuration
+         lda   V.HNDL,u     using the handle returned previously
+         sta   NPB.HNDL,y
+         ldb   #SPI.DD
+         stb   NPB.FUNC,y
+         lbsr  NFDirect     Call API function to register configuration
+         puls  y
+         
+* Detach from the SPI driver
+         pshs  u
+         ldu   V.SPI,u      Device Table Entry
+         OS9   I$Detach
+         puls  U            Ignore any error
+
+* Return local memory
+         ldu   V.BUF,u      Point to memory for return
+         ldd   #SPIXMem
+         OS9   F$SRtMem     Return local buffer to free mem
+         
+         clrb
+         rts
 
 
- emod
+         emod
 
-eom equ *
+eom      equ   *
 
- end
+         end
