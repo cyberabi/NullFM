@@ -17,7 +17,5 @@ os9 copy modules/spibus.disto disks/nullfm.dsk,spibus.disto
 os9 copy modules/spibus.slot3 disks/nullfm.dsk,spibus.slot3
 os9 copy modules/spibus.disto.l1 disks/nullfm.dsk,spibus.disto.l1
 os9 copy modules/spibus.slot3.l1 disks/nullfm.dsk,spibus.slot3.l1
-os9 copy modules/flash0_35s disks/nullfm.dsk,flash0_35s
-os9 copy modules/w25qxx disks/nullfm.dsk,w25qxx
 os9 dir disks/nullfm.dsk
 
