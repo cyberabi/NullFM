@@ -149,12 +149,13 @@ RESTOR   equ   *
 * a configuration that tells the SPI bus our slave select, the
 * kind of clocking we need, etc.
 *
-* Entry: (U) = Pointer To Global Storage
+* Entry: U = Global Storage
+*        Y = Device Descriptor
 *
-* Exit:  (A) Modified
-*        (X) Modified
-*        (Y) Unchanged
-*        (U) Unchanged
+* Exit:  A Modified
+*        X Modified
+*        Y Unchanged
+*        U Unchanged
 *
 
 Init     lda   #$FF
@@ -211,40 +212,61 @@ RETRN1   rts
 *
 * Write Sector Command
 *
-* For this device, we don't allow sector writes although
-* technically we can write a sector exactly once after
-* it is erased. To write this device use track writes.
+* This is a flash device, and we can only "clear" bits
+* in it during a write. A format "sets" all bits in a
+* given track.
 *
-* Entry: (B) = Msb Of Logical Sector Number
-*        (X) = Lsb's Of Logical Sector Number
-*        (Y) = Ptr To Path Descriptor
-*        (U) = Ptr To Global Storage
+* The main way to enforce this is to pre-read the sector
+* to make sure it is all $FF; if not, return a write error.
+* This makes writes expensive but they are meant to happen
+* only once (e.g. when backup up another disk here)
+*
+* Because we allocate two full flash "sectors" per track
+* regardless of actual track size, we have to translate
+* the provided LSN to get a correct flash address.
+*
+* Entry: B = Msb Of Logical Sector Number
+*        X = Lsb's Of Logical Sector Number
+*        Y = Path Descriptor
+*        U = Global Storage
+*
+*        PD.BUF,Y = Sector buffer
 *
 * Error:
 *   Carry Set
 *   B = Error Code
 *
 
-Write    comb
+Write    bsr   SELECT       Select drive
+          bcs  WRERR9
+          
+* FIXME: Translate the LSN
+* FIXME: Pre-read the sector and check for $FF
+* FIXME: Write the sector from caller's buffer
+
+         comb
          ldb   #E$WP        Error: write protected
-         rts
+WRERR9   rts
 
 
 ******************************
 *
-* Write Full Track
+* Write Full Track (SS.WTrk)
 *
 * For this device, we always allocate 32 pages (two sectors, 8K)
 * to a track regardless of how much the device actually uses.
+*
 * Note that this will fail if a device descriptor declares more
 * than 32 spt (which we could check at the Init call but don't).
-* The caller need provide only as much data as the device
-* descriptor declares (e.g. 18*256 bytes as with a typical floppy).
 *
-* Entry: (A) = Track
-*        (X) = PD.RGS
-*        (Y) = Path Descriptor
-*        (U) = Global Storage
+* The caller's track buffer is ignored; we just erase the "track".
+*
+* Entry: X = PD.RGS
+*        Y = Path Descriptor
+*        U = Global Storage
+*
+*        R$X = Address of track buffer.*        R$U = Track number (LS 8 bits)
+*        R$Y = Side number (LS bit)
 *
 
 WRTTRK   bsr   SELECT       Select drive
@@ -255,23 +277,35 @@ WRTTRK   bsr   SELECT       Select drive
          ldx   Curtbl,u     Point to drive table
          stb   DD.Fmt,x     Update media format byte
          
-* To write a full track, we first erase it. This requires two SPI
-* commands, one to erase each 4K sector of the track.
-256
-WRTRK2 lbsr SEEKTR Seek to track
- ldb #F.WRTR
- ldx PD.RGS,y
- ldx R$X,x Get buffer addr
- clr V.Eflg,u
- bra WRITS1
- 
+* Write-enable the flash
+         asla
+         pshs  a            (two flash "sectors" per logical track)
+         ldb   #F.WREN      Write-enable the device
+         bsr   CMD1B        (execute one-byte command)
+          bcs  WRERR9
+         
+* Erase this part of the flash first
+         bsr   SCT2ADR      Get starting address of 1st flash sector in this track
+         ldb   #F.ERSCT     Erase Sector command
+         bsr   CMD4B
+         puls  a
+          bcs  WRERR9
+          
+         inca
+         bsr   SCT2ADR      Get starting address of 2nd flash sector in this track
+         ldb   #F.ERSCT     Erase Sector command
+         bsr   CMD4B
+          bcs  WRERR9
+         
+         rts
+         
+         
 *
-* Convert a logical track number in A, to a flash address in A:X.
-* A physical track is always 32 pages for this driver (some can be unused)
-* Result is therefore logical track * 32 * 256
+* Convert a flash sector number in A, to a flash address in A:X.
+* A flash sector is 16 pages, a page is 256 bytes
 *
-TRK2ADR  clr   ,-s
-         ldb   #32
+SCT2ADR  clr   ,-s
+         ldb   #16
          mul
          pshs  d
          puls  a,x,pc
@@ -282,7 +316,7 @@ TRK2ADR  clr   ,-s
 * A physical track is always 32 pages for this driver (some can be unused);
 * the sectors-per-track will be in the range 1..32.
 *
-* For this demo we just use an ugly subtraction loop
+* For this demo we just use an ugly subtraction loop to divide
 *
 LSN2TRK  clr   ,-s
          clr   ,-s
@@ -302,7 +336,7 @@ DIVLP    ldd   3+1,s
           
 * This subtraction failed; correct remainder and exit
          ldb   3+1+1,s
-         addd  0+1,s        Correct remainder is in D (B actually); correct track is at 6+1,s
+         addd  0+1,s        Correct remainder (sector) is in D (B actually); correct track is at 6+1,s
          leas  6+1,s
          puls  x,pc
 
@@ -318,74 +352,40 @@ DIVOK    sta   3+0,s
          
          
  pag
-*************************************************************
+******************************
 *
 * Read Sector Command
 *
-* Input: B = Msb Of Logical Sector Number
-*        X = Lsb'S Of Logical Sector Number
-*        Y = Ptr To Path Descriptor
-*        U = Ptr To Global Storage
+* Because we allocate two full flash "sectors" per track
+* regardless of actual track size, we have to translate
+* the provided LSN to get a correct flash address.
 *
-* Output: 256 Bytes Of Data Returned In Buffer
+* Entry: B = Msb Of Logical Sector Number
+*        X = Lsb's Of Logical Sector Number
+*        Y = Path Descriptor
+*        U = Global Storage
+*
+*        PD.BUF,Y = Sector buffer
+*
+* Exit:  256 Bytes Of Data Returned In Buffer
+*
+* Error:
+*   Carry Set
+*   B = Error Code
+*
+*
 *
 * Error: Cc=Set, B=Error Code
 *
-READSK lda #$91 Error retry code
- cmpx #0 Is this sector zero?
- bne RDDSK3 Branch if not
- lbra READ0 Do read of sector zero
+Read     bsr   SELECT       Select drive
+          bcs  RDERR9
+          
+* FIXME: Translate the LSN
+* FIXME: Read the sector
 
-
-RDDSK1 bcc RDDSK3 Retry without restore
- pshs d,x
- lbsr RESTOR Drive to tr00
- puls d,x
-RDDSK3 pshs d,x
- bsr READSC Read sector
- puls d,x
- bcc WRERR9 Return if no error
- lsra DONE?
- bne RDDSK1 ...no; retry.
-*
-* Fall Through To Try One Last Time
-*
-READSC bsr SEEK Move head to track
- bcs WRERR9
- ldx PD.BUF,y Point to buffer
- pshs CC Save irq mask info
- orcc #IRQMask+FIRQMask Disable interrupts
- ldb #F.READ Read sector command
- lbsr WCR Issue command
- pshs Y,u Save regs
- ldy V.CMDR,u
- ldu V.DATR,u
- bra READS3
- pag
-************************************************************
-*
-* Read Loop
-*
-READS2 lda ,u Get data
- sta ,x+ Store it
-READS3 ldb ,y Get status
- bitb #%00000010 Data req?
- bne READS2 ..yes; honor it.
- bitb #%00000001 Done?
- bne READS3 ...no; try again.
-
-
- puls Y,u Restore regs
- puls CC Restore irq mask info
- bitb #%00000100 Lost data?
- bne RDERR ..yes; return it.
- lbra STCK
-
-
-
-RDERR comb
- ldb #E$Read
- rts
+         comb
+         ldb   #E$WP        Error: write protected
+RDERR9   rts
  
 
          pag
@@ -393,7 +393,8 @@ RDERR comb
 *
 * Select Drive
 *
-* Entry: (U)= Pointer To Global Storage
+* Entry: U = Pointer To Global Storage
+*        Y = Pointer To Path Descriptor
 *
 * Exit:  Curtbl,u=Current Drive Tbl
 *        Curdrv,u=Drive Number
@@ -409,6 +410,7 @@ SELECT   lda   PD.DRV,y     Get drive number
          mul                OFFSET For this drive
          leax  d,x
          stx   CURTBL,u     Current table ptr
+         clr   V.SIDE,u     Default to side zero (used by PHYSIC)
          puls  b,x,pc
 
 
@@ -417,27 +419,6 @@ ERUNIT   comb
          rts
          
          
-***************************************************************
-*
-* Seek A Track
-*
-* Input:
-*   B = Msb Of Logical Sector Number
-*   X = Lsb'S Of Logical Sector Number
-*
-* Output:
-*   X = Physical Sector Number
-*   A,B = Undefined
-*
-* Error:
-*   Carry Set
-*   B = Error Code
-*
-SEEK bsr SELECT Select drive
- bcs RETRN2 Drive out of range?
- bsr PHYSIC Convert to physical sect + track
- bcs RETRN2 Sector out of range?
-SEEKTR bra SETTRK Set up for track change
  pag
 **************************************************************
 *
@@ -446,81 +427,66 @@ SEEKTR bra SETTRK Set up for track change
 *
 *  Input:  B = Msb Of Logical Sector Number
 *          X = Lsb'S Of Logical Sector Number
+*          U = Global storage
+*
+*          V.SIDE,U = 0 (cleared by SELECT)
+*
 *  Output: A = Physical Track Number
 *          Sector Reg = Physical Sector Number
 *  Error:  Carry Set & B = Error Code
 *
-PHYSIC tstb CHECK Sector bounds
- bne PHYERR  msb must be zero
- tfr X,D Logical sector (os-9)
- cmpd #0 Logical sector zero?
- beq PHYSC7 ..yes; skip conversion.
- ldx CURTBL,u
- cmpd DD.TOT+1,x Too high sector number?
- bhs PHYERR ..yes; sorry
- stb V.TMP,u Save (b)
- clrb
- pshs B Will be track number
- ldb DD.FMT,x
- lsrb SHIFT Side bit to carry
- ldb V.TMP,u Restore (b)
- bcs PHYSC4 Bra if double sided
- dec 0,S
-PHYSC2 inc 0,S
- subb DD.TKS,x Subtract one track worth of sectors
- sbca #0
- bcc PHYSC2 Repeat until less than 1 track size
- bra PHYSC5
-PHYSC3 com V.SIDE,u Switch sides
- bne PHYSC4 Skip track inc if side 1
- inc 0,S
-PHYSC4 subb DD.TKS,x
- sbca #0
- bcc PHYSC3 Repeat until less than 1 trk
-PHYSC5 addb DD.TKS,x Add back for sector number
- puls A Desired track.
-PHYSC7 stb [V.SECR,u] Put sector (b) in sector reg
- clrb
-RETRN2 rts
+PHYSIC   tstb               CHECK Sector bounds
+          bne  PHYERR       msb must be zero
+          
+         tfr   x,d          Logical sector (os-9)
+         cmpd  #0           Logical sector zero?
+          beq  PHYSC7       ..yes; skip conversion.
+          
+         ldx   CURTBL,u
+         cmpd  DD.TOT+1,x   Too high sector number?
+          bhs  PHYERR       ..yes; sorry
+          
+         stb   V.TMP,u      Save (b)
+         clrb
+         pshs  b            Will be track number
+         ldb   DD.FMT,x
+         lsrb               SHIFT Side bit to carry
+         ldb   V.TMP,u      Restore (b)
+          bcs  PHYSC4       Bra if double sided
+          
+* Compute track (single-sided)
+         dec   0,s          (single-sided starts at -1)
+PHYSC2   inc   0,s
+         subb  DD.TKS,x     Subtract one track worth of sectors
+         sbca  #0
+          bcc  PHYSC2       Repeat until less than 1 track size
+         bra   PHYSC5
+         
+* Compute track (double-sided) (enter at PHYSC4)
+* Even-numbered tracks are on side 0, odd-numbered tracks
+* are on side 1
+PHYSC3   com   V.SIDE,u     Switch sides
+          bne  PHYSC4       Skip track inc if side 1
+          
+         inc   0,s
+         
+PHYSC4   subb  DD.TKS,x
+         sbca  #0
+          bcc  PHYSC3       Repeat until less than 1 trk
+          
+PHYSC5   addb  DD.TKS,x     Add back for sector number
+         puls  a            Desired track.
+         
+PHYSC7   stb   [V.SECR,u]   Put sector (b) in sector reg
+         clrb
+RETRN2   rts
 
 
-PHYERR comb
- ldb #E$SECT Error: bad sector number
- rts
+PHYERR   comb
+         ldb   #E$SECT      Error: bad sector number
+         rts
+
  
- pag
-***********************************************************
-*
-* Check Status For Error Conditions
-*
-*  Input: (B)= Status Of Fd1771
-*
-*  If Error: (B)= Error Code & Carry Is Set
-*
-*  If No Error: Carry Is Clear
-*
-STCK bitb #%10000000 Drive ready?
- bne ERNRDY ..no; error
- bitb #%00010000 Seek error?
- bne ERSEEK ..yes; return error
- bitb #%00001000 Check sum ok?
- bne ERRCRC ..no; return error
- clrb
- rts
-
-
-
-ERNRDY comb
- ldb #E$NotRdy Error: drive not ready
- rts
-
-ERSEEK comb
- ldb #E$SEEK Error: seek error
- rts
-
-ERRCRC comb
- ldb #E$CRC Error: bad check sum
- rts
  pag
 ****************************************************************
 *
@@ -563,79 +529,8 @@ READ05 clrb
 TYPERR comb
  ldb #E$BTYP
  puls X,y,pc
- pag
-****************************************************************
-*
-*
-* Write Command Register
-*
-*
-*   1 - Will Add Step Rate To Seek Commands When Wcr0 Called
-*   2 - Issues Command To Controller Chip
-*   3 - Will Wait For Status "Not Busy" If Wcr0 Called
-*
-*
-WCR0 eorb PD.STP,y Add step rate to command
-
- bsr WCR Issue command & delay
-WCR02 ldb [V.CMDR,u] Get status
- bitb #%00000001 Busy?
- bne WCR02 ..yes; wait for it.
- rts
-
-
-
-WCR lda CURDRV,u
- sta [V.SEL,u] Select drive
- orb V.EFLG,u
- clr V.EFLG,u
- stb [V.CMDR,u] Issue command
-
-
-DELAY bsr DELAY1
-DELAY1 bsr DELAY2
-DELAY2 bsr DELAY4
-DELAY4 nop
- rts
- pag
-*********************************************
-*
-* Write Verify Routine
-*
-*
-*    Reads back the sector just written
-*    Returns carry set if bad sector
-*    Compares 'read' data to 'write' data
-*    Returns carry set if no compare
-*  Note: Only 2 bytes out of every 8 is compared
-*        assuming that any other error will cause
-*        a bad Crc.
-
-WRTVFY pshs d,x
- ldx PD.BUF,y Save present buffer addr
- pshs X On stack
- ldx V.BUF,u Point to local buffer
- stx PD.BUF,y
- ldx 4,S Restore (x)
- lbsr READSK
- puls X
- stx PD.BUF,y Restore buffer pointer
- bcs WRTVF6 Error; ...try again
- lda #32 Test 32 places in buffer
- pshs a,y,u
- ldy V.BUF,u Point "y" to local buffer
- tfr x,u
-WRTCHK ldx 0,u Get two bytes
- cmpx 0,y Check with 'read data'
- bne WRTVF2 Error; ...return carry set
- leau 8,u
- leay 8,y Bump both pointers
- dec 0,s Done yet?
- bne WRTCHK No; ....keep checking
- bra WRTVF4
-WRTVF2 orcc #%00000001 Set carry
-WRTVF4 puls a,y,u
-WRTVF6 puls d,x,pc
+ 
+ 
  pag
 **************************************
 *
