@@ -48,18 +48,18 @@ SPIXMem  set   256+6        Sector buffer + room for the largest SPI command
 * wasteful but gives us a straightforward demo of the SPI bus controlling flash.
 *
 
-F.PGPGM  equ   $02          (A A A D...) Page program / write (a sector is 4K; a page is 256 bytes)
+F.PGPGM  equ   $02          (A A A D...) Page program / write (a sector is 4K; a page is 256 bytes) 0.4 - 3ms
 F.WRDS   equ   $04          Write disable
 F.RSTS1  equ   $05          (d) Read status register 1 (7-0)
 F.WREN   equ   $06          Write enable
 F.READF  equ   $0B          (A A A 0 d...) Fast read
 F.RSTS3  equ   $15          (d) Read status register 3 (23-16)
-F.ERSCT  equ   $20          (A A A) Sector erase (a sector is 4K: a page is 256 bytes)
+F.ERSCT  equ   $20          (A A A) Sector erase (a sector is 4K: a page is 256 bytes) 45 - 400ms
 F.RSTS2  equ   $35          (d) Read status register 2 (15-8)
-F.ERCHP  equ   $60          Erase entire chip
+F.ERCHP  equ   $60          Erase entire chip 40 - 200s
 F.ENRST  equ   $66          Enable soft reset
 F.EXRST  equ   $99          Execute soft reset
-F.ERCH2  equ   $C7          Erase entire chip (secondary)
+F.ERCH2  equ   $C7          Erase entire chip (secondary) 40 - 200s
 
 S1.WEL   equ   %00000010    Indicates write enabled
 S1.BSY   equ   %00000001    Indicates a write in progress
